@@ -44,6 +44,17 @@ Read this first. The docs in `live-build/` in this Project are the source of tru
   1. Revoke browser INSERT/UPDATE/DELETE/TRUNCATE grants and the column SELECT on `tool_versions.checks/source`. RLS already blocks these; this is the backstop. SQL is in `supabase/migrations/04_guards_and_sanity.sql`.
   2. Test-data cleanup (`tests/cleanup.sql`, plus `cil-audit-%` tools).
   3. `OPENAI_API_KEY`: add it in Supabase → Edge Functions → Secrets. The key pasted in chat should be rotated.
+- **Re-review (19 Oct) gaps, closed in engine v6:**
+  - one connection per engine instance (20 concurrent calls give clean refusals, no 500s);
+  - roll numbers caught when spaced, hyphenated, full-width or run together (dates and times excluded);
+  - room labels outside column A, and rolls on header rows, are flagged;
+  - impossible dates are refused, and object values are refused as field values;
+  - the byte-size cap is enforced, and the rate limit is counted inside the locked transaction;
+  - approval history stores the role, not the email;
+  - the page re-confirms every sheet for each new file and shows which sheets it ignored;
+  - the monitor also checks the rep audience and open/write policies.
+
+  Verified: 10/10 new probes, 14/14 earlier probes, live suite 51/51.
 - **Known gap:** every invigilator sees every room's roster; limiting this needs room-assignment data.
 - **Vision vs path:** the free tiers and the frozen stack are economics and sequencing, not vision. See the project document.
 
