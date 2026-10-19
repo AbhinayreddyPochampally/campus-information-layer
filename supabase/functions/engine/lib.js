@@ -284,7 +284,7 @@ export function runSeating(sheets, cfg) {
   const conf = cfg.sheets || {};
   Object.entries(sheets).forEach(([sheet, rows]) => {
     const c = conf[sheet];
-    const validDate = d => /^\d{4}-\d{2}-\d{2}$/.test(String(d || "")) && !isNaN(Date.parse(d));
+    const validDate = d => /^\d{4}-\d{2}-\d{2}$/.test(String(d || "")) && !isNaN(Date.parse(d)) && new Date(d + "T00:00:00Z").toISOString().slice(0, 10) === d;
     const validTime = t => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(t || ""));
     const problem = !c ? "" : !validDate(c.date) ? "the date is not a valid YYYY-MM-DD date" : !(validTime(c.start) && validTime(c.end)) ? "start and end must be HH:MM times" : c.start >= c.end ? "the end time must be after the start" : !c.confirmed ? "it has not been confirmed for this file" : "";
     const confirmed = !!c && !problem;
@@ -294,9 +294,14 @@ export function runSeating(sheets, cfg) {
     let room = null, courses = [], header = null;
     rows.forEach((r, i) => {
       const a = String(r[0] || "").trim();
-      const rm = a.match(/^(?:C\.?\s*R\.?|Room|Classroom)\s*[-.:#]?\s*(\d+)\b/i);
+      const ROOM = /^(?:C\.?\s*R\.?|Room|Classroom)\s*[-.:#]?\s*(\d+)\b/i;
+      const rm = a.match(ROOM);
+      const idsIn = cells => cells.map(c => String(c || "").trim()).filter(v => /^\d{6,}$/.test(v));
+      // A room label outside column A would silently put the next rows in the previous room: block it.
+      if (!rm && r.slice(1).some(c => ROOM.test(String(c || "").trim()))) { flags.push({ key: `roomcol|${sheet}|${i}`, type: "layout", message: `A room label on "${sheet}" row ${i + 1} is not in column A, so the seats below it can't be placed safely.` }); return; }
+      if (rm && idsIn(r.slice(2)).length) flags.push({ key: `roomids|${sheet}|${i}`, type: "layout", message: `The room header for ${rm[1]} on "${sheet}" row ${i + 1} also holds roll numbers; they were not seated.` });
       if (rm) { room = rm[1]; courses = splitExamCourses(r[1]); header = null; if (!String(r[1] || "").trim()) flags.push({ key: `room|${sheet}|${i}`, type: "layout", message: `Room ${room} on sheet "${sheet}" (row ${i + 1}) has no exam or section next to it.` }); return; }
-      if (!a && r.some(c => /^COLUMN/i.test(String(c || "")))) { header = r.map(c => { const m = String(c || "").match(/COLUMN\s*-?\s*(\d+)/i); return m ? +m[1] : null; }); return; }
+      if (!a && r.some(c => /^COLUMN/i.test(String(c || "")))) { if (idsIn(r.slice(1)).length) flags.push({ key: `colids|${sheet}|${i}`, type: "layout", message: `The column header row on "${sheet}" row ${i + 1} also holds roll numbers; they were not seated.` }); header = r.map(c => { const m = String(c || "").match(/COLUMN\s*-?\s*(\d+)/i); return m ? +m[1] : null; }); return; }
       const rw = a.match(/^(?:Row|R)\s*[-.:#]?\s*(\d+)$/i);
       if (!rw) {
         // Never skip silently: anything in column A we don't understand, or seats with no row label, blocks publishing.

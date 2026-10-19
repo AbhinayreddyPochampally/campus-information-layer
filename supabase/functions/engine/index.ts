@@ -8,7 +8,8 @@ import { validateSpec, placement, evalRules, canView, transition, runGeneratedTe
 
 const URL_ = Deno.env.get("SUPABASE_URL")!;
 const ANON = Deno.env.get("SUPABASE_ANON_KEY")!;
-const sql = postgres(Deno.env.get("SUPABASE_DB_URL")!, { prepare: false, max: 3 });
+// One connection per engine instance, released quickly: many concurrent calls must not exhaust the database.
+const sql = postgres(Deno.env.get("SUPABASE_DB_URL")!, { prepare: false, max: 1, idle_timeout: 5, connect_timeout: 10 });
 
 const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type", "Access-Control-Allow-Methods": "POST, OPTIONS" };
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { ...CORS, "Content-Type": "application/json" } });
@@ -29,20 +30,25 @@ const own = (o: any, k: unknown) => typeof k === "string" && Object.prototype.ha
 // A field value must match its declared type; returns an error message or "".
 function badField(fd: any, v: any): string {
   if (v === undefined || v === null || v === "") return "";
+  if (typeof v === "object") return "has the wrong type";
   const s = String(v);
   switch (fd.type) {
     case "text": return s.length > 300 ? "is longer than 300 characters" : "";
     case "longtext": return s.length > 4000 ? "is longer than 4000 characters" : "";
     case "number": return Number.isFinite(Number(v)) && s.length <= 15 ? "" : "is not a number";
-    case "date": return /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(Date.parse(s)) ? "" : "is not a YYYY-MM-DD date";
+    case "date": return /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(Date.parse(s)) && new Date(s + "T00:00:00Z").toISOString().slice(0, 10) === s ? "" : "is not a real YYYY-MM-DD date";
     case "time": return /^([01]\d|2[0-3]):[0-5]\d$/.test(s) ? "" : "is not an HH:MM time";
     case "enum": return (fd.options || []).includes(s) ? "" : `must be one of ${(fd.options || []).join(", ")}`;
     case "ref": return ((TABLES[fd.table] || {}).rows || []).some(r => Object.values(r).map(String).includes(s)) ? "" : `is not in ${fd.table}`;
     default: return "has an unknown type";
   }
 }
-// Records shown to a group must never carry someone's member ID.
-const MEMBER_ID = /(^|[^0-9])[0-9]{9}([^0-9]|$)/;
+// Records shown to a group must never carry someone's member ID, however it is written
+// (spaced, hyphenated, full-width digits, or run together with another number).
+const hasMemberId = (text: string) => /\d{9}/.test(String(text).normalize("NFKC")
+  .replace(/\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}:\d{2}/g, " ")   // dates and times are not IDs
+  .replace(/(\d)[\s.\-\u2010-\u2015/]+(?=\d)/g, "$1"));
+
 
 type Caller = { uid: string; email: string; org: any; member_id: string | null; role: string; staff: boolean; db: any };
 
@@ -108,7 +114,7 @@ async function doImport(c: Caller, b: any) {
   if (!b.sheets || typeof b.sheets !== "object" || Array.isArray(b.sheets)) refuse("The file has no readable sheets.");
   const sheetList = Object.entries(b.sheets);
   if (!sheetList.length || sheetList.length > 60) refuse("Upload between 1 and 60 sheets.");
-  if (sheetList.some(([, rows]: any) => !Array.isArray(rows) || rows.length > 5000 || rows.some((r: any) => !Array.isArray(r) || r.length > 60))) refuse("A sheet is not a grid of rows, or is too large (5,000 rows × 60 columns at most).");
+  if (sheetList.some(([, rows]: any) => !Array.isArray(rows) || rows.length > 5000 || rows.some((r: any) => !Array.isArray(r) || r.length > 60 || r.some((x: any) => x !== null && typeof x === "object")))) refuse("A sheet is not a grid of rows, or is too large (5,000 rows × 60 columns at most).");
   const res = ad.run(b);
   const spec = ad.spec;
   const errs = validateSpec(spec, env(c)); if (errs.length) refuse("The tool spec is invalid.", errs);
@@ -117,7 +123,7 @@ async function doImport(c: Caller, b: any) {
   const byRoom: Record<string, any[]> = {};
   res.seats.forEach((s: any) => (byRoom[`${s.sheet}|${s.room}`] = byRoom[`${s.sheet}|${s.room}`] || []).push(s));
   const rosters = Object.values(byRoom).map(g => ({ data: { exam: g[0].exam, date: g[0].date, start: g[0].start, end: g[0].end, room: g[0].room, courses: g[0].courses.join(" / "), students: g.length, sheet: g[0].sheet, seats: g.map(s => `R${s.row}C${s.col} ${s.roll}`).join(", ") }, subject: null, src: g[0].sheet }));
-  if (b.notice && MEMBER_ID.test(`${b.notice.title || ""} ${b.notice.body || ""}`)) res.issues.push({ key: "notice|member-id", type: "privacy", message: "The notice to everyone contains a roll number. Remove it: notices are shown to every student." }), res.flags.push(res.issues.at(-1));
+  if (b.notice && hasMemberId(`${b.notice.title || ""} ${b.notice.body || ""}`)) res.issues.push({ key: "notice|member-id", type: "privacy", message: "The notice to everyone contains what looks like a roll number (9 or more digits). Remove it: notices are shown to every student." }), res.flags.push(res.issues.at(-1));
   const notice = b.notice && String(b.notice.body || "").trim() ? [{ data: { title: String(b.notice.title || "Exam Cell notice").slice(0, 200), body: String(b.notice.body).slice(0, 4000) }, subject: null }] : [];
   const checks = { ok: res.issues.length === 0 && res.seats.length > 0, issues: res.issues.length, flags: res.flags, summary: { seats: res.seats.length, students: res.students, rooms: res.rooms, rosters: rosters.length, notices: notice.length } };
   const source = { adapter: b.adapter, files: (b.files || []).slice(0, 20), sheets: Object.keys(b.sheets || {}), cfg: b.cfg || {}, notice: b.notice || null, imported_at: new Date().toISOString() };
@@ -159,7 +165,7 @@ async function doPublish(c: Caller, b: any) {
     await tx`select id from public.tools where id = ${v.tool_id} for update`; // concurrent publishes of one tool queue here
     const [still] = await tx`select status from public.tool_versions where id = ${v.id}`;
     if (still.status !== "draft") refuse(`This version is already ${still.status}.`);
-    const [leak] = await tx`select count(*)::int as n from public.records where version_id = ${v.id} and ('everyone' = any(audience) or 'student' = any(audience)) and data::text ~ '(^|[^0-9])[0-9]{9}([^0-9]|$)'`;
+    const [leak] = await tx`select count(*)::int as n from public.records where version_id = ${v.id} and ('everyone' = any(audience) or 'student' = any(audience) or 'rep' = any(audience)) and regexp_replace(normalize(data::text, NFKC), '[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}|[0-9]{1,2}[./-][0-9]{1,2}[./-][0-9]{2,4}|[0-9]{1,2}:[0-9]{2}', ' ', 'g') ~ '[0-9]([[:space:]./-]*[0-9]){8}'`;
     if (leak.n) refuse(`${leak.n} record(s) shown to a whole group contain a roll number. Remove them before publishing.`);
     const [cnt] = await tx`select count(*)::int as total, count(*) filter (where subject_member_id is null and cardinality(audience) = 0)::int as unplaced from public.records where version_id = ${v.id}`;
     const fromFile = (v.spec.inputs || []).some((i: any) => i.kind === "file");
@@ -187,12 +193,13 @@ async function doSubmit(c: Caller, b: any) {
   inp.fields.forEach((f: string) => { if (b.data && own(b.data, f)) data[f] = b.data[f]; }); // form fields only; subject is never taken from the request
   const bad = Object.entries(data).map(([f, val]) => [f, badField(fields[f] || {}, val)]).filter(([, e]) => e);
   if (bad.length) refuse(bad.map(([f, e]) => `${(fields[f] || {}).label || f} ${e}`).join("; ") + ".");
-  const [recent] = await sql`select count(*)::int as n from public.audit_log where actor = ${c.uid} and action = 'submit' and at > now() - interval '1 hour'`;
-  if (recent.n >= 20 && !c.staff) refuse("Too many submissions in the last hour. Try again later.");
+
   const state = spec.workflow && spec.workflow.entity === inp.entity ? spec.workflow.initial : null;
   const ctx = await ruleContext(c, spec);
   return await sql.begin(async (tx: any) => {
     await tx`select id from public.tool_versions where id = ${v.id} for update`; // serialise submits per tool so rules see every neighbour
+    const [recent] = await tx`select count(*)::int as n from public.audit_log where actor = ${c.uid} and action = 'submit' and at > now() - interval '1 hour'`;
+    if (recent.n >= 20 && !c.staff) refuse("Too many submissions in the last hour. Try again later.");
     const nb = await tx`select id, data, state, subject_member_id from public.records where version_id = ${v.id} and entity = ${inp.entity}`;
     const rec = { id: "new", ...data, state, requester: c.member_id };
     const store = { [inp.entity]: [...nb.map((x: any) => ({ id: x.id, state: x.state, requester: x.subject_member_id, ...x.data })), rec] };
@@ -222,7 +229,7 @@ async function doTransition(c: Caller, b: any) {
     const rec = asRec(row);
     const r = transition(spec, { [seen.entity]: nb.map(asRec) }, rec, b.step, { role: c.role, id: c.member_id, staff: c.staff }, b.note, ctx);
     if (!r.ok) refuse(r.error, r.findings);
-    const history = [...(row.data._history || []), { at: new Date().toISOString(), by: c.email, action: b.step, from: r.from, to: r.to, note: b.note || "" }];
+    const history = [...(row.data._history || []), { at: new Date().toISOString(), by: c.role, action: b.step, from: r.from, to: r.to, note: b.note || "" }];
     await tx`update public.records set state = ${r.to}, data = ${tx.json({ ...row.data, _history: history })} where id = ${row.id} and state = ${r.from}`;
     for (const n of r.notices) {
       const to = n.to === "requester" ? { subject: row.subject_member_id, audience: [] } : { subject: null, audience: [n.to] };
@@ -317,7 +324,7 @@ Deno.serve(async (req) => {
   let body: any = {}, caller: Caller | null = null;
   try {
     const raw = await req.text();
-    if (raw.length > MAX_BODY) refuse("The request is too large.");
+    if (new TextEncoder().encode(raw).length > MAX_BODY) refuse("The request is too large.");
     try { body = JSON.parse(raw); } catch { refuse("The request body is not JSON."); }
     if (!body || typeof body !== "object" || Array.isArray(body)) { body = {}; refuse("The request body must be a JSON object."); }
     caller = await identify(req);
@@ -326,11 +333,12 @@ Deno.serve(async (req) => {
     return json({ ok: true, result: await fn(caller, body) });
   } catch (err) {
     const known = err instanceof Refusal || (err as any)?.name === "Refusal";
-    const reason = known ? (err as Error).message : "The change could not be saved.";
+    const busy = /too many clients|remaining connection slots|timeout/i.test(String((err as Error)?.message || ""));
+    const reason = known ? (err as Error).message : busy ? "The system is busy. Wait a few seconds and try again." : "The change could not be saved.";
     const detail = known ? (err as Refusal).detail ?? null : { error: String((err as Error)?.message || err).slice(0, 500) };
     try { // separate statement, after the failed transaction has rolled back; never touches records
       await sql`insert into public.refusals (org_id, actor, action, reason, detail) values (${caller?.org?.id ?? null}, ${caller?.uid ?? null}, ${String(body?.action || "unknown").slice(0, 40)}, ${reason}, ${sql.json(detail)})`;
     } catch (_) { /* logging must never mask the refusal */ }
-    return json({ ok: false, reason, detail: known ? detail : null }, known ? 403 : 500);
+    return json({ ok: false, reason, detail: known ? detail : null }, known ? 403 : busy ? 503 : 500);
   }
 });

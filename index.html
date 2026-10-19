@@ -191,7 +191,8 @@ async function viewSeating() {
    ${live ? `<p>${live.checks?.summary?.seats ?? "?"} seats for ${live.checks?.summary?.students ?? "?"} students across ${live.checks?.summary?.rooms ?? "?"} rooms · published ${fmtTs(live.published_at)}<br><span class="sub">${esc((live.source?.files || []).join(", "))}</span></p>` : `<p class="sub">No seating has been published yet.</p>`}</div>
   <div class="card"><h3>1 · Choose files</h3>
    <label class="b" for="xl">Choose .xlsx files</label> <input id="xl" class="hide" type="file" accept=".xlsx,.xls" multiple>
-   <span class="sub" id="fl">${IMPORT.files.length ? esc(IMPORT.files.join(", ")) + ` · ${Object.keys(IMPORT.sheets).length} sheets` : "No file chosen"}</span></div>
+   <span class="sub" id="fl">${IMPORT.files.length ? esc(IMPORT.files.join(", ")) + ` · ${Object.keys(IMPORT.sheets).length} sheets` : "No file chosen"}</span>
+   ${(IMPORT.skipped || []).length ? `<p class="sub">Not seating, so not read: ${esc(IMPORT.skipped.join(", "))}</p>` : ""}</div>
   <div class="card ${Object.keys(IMPORT.sheets).length ? "" : "hide"}"><h3>2 · Confirm each sheet</h3>
    <p class="sub">The file doesn't say the date or time for certain; the sheet name is only a hint. Confirm them once and they're remembered.</p>
    <div class="scroll"><table><thead><tr><th>Sheet</th><th>Exam</th><th>Date</th><th>Start</th><th>End</th></tr></thead><tbody>
@@ -225,15 +226,21 @@ function renderResult(r) {
 async function readFiles(e) {
   const files = [...e.target.files]; if (!files.length) return;
   IMPORT.sheets = {}; IMPORT.files = files.map(f => f.name); IMPORT.result = null;
+  // A new file always needs its sheets confirmed again; earlier answers are only a prefill.
+  IMPORT.cfg.sheets = Object.fromEntries(Object.entries(IMPORT.cfg.sheets).map(([k, c]) => [k, { ...c, confirmed: false }])); IMPORT.cfg.acks = {};
+  const skipped = [];
   for (const f of files) {
     const wb = XLSX.read(await f.arrayBuffer(), { type: "array" });
     wb.SheetNames.forEach(n => {
       const rows = XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, defval: "", raw: false }).map(r => r.map(c => String(c).trim()));
       const key = IMPORT.sheets[n] ? `${n} (${f.name})` : n;
-      if (rows.some(r => r.some(c => /^CR\s*-?\s*\d+/i.test(c)))) IMPORT.sheets[key] = rows; // seating sheets only
+      // Keep any sheet that names a room or holds roll-number-like values; the engine decides what is valid.
+      if (rows.some(r => r.some(c => /^(?:C\.?\s*R\.?|Room|Classroom)\s*[-.:#]?\s*\d+/i.test(c) || /^\d{6,}$/.test(c)))) IMPORT.sheets[key] = rows;
+      else if (rows.some(r => r.some(c => c))) skipped.push(`${n} (${f.name})`);
     });
   }
-  if (!Object.keys(IMPORT.sheets).length) { toast("No seating sheets found (rooms like CR-305 in column A)."); return viewSeating(); }
+  IMPORT.skipped = skipped;
+  if (!Object.keys(IMPORT.sheets).length) { toast("No seating sheets found (no rooms or roll numbers)."); return viewSeating(); }
   await runCheck(true);
 }
 function collectCfg() {
