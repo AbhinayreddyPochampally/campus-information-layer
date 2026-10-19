@@ -29,6 +29,24 @@ Read this first. The docs in `live-build/` in this Project are the source of tru
 3. **OPENAI_API_KEY** as an edge-function secret (for `draft_tool` only).
 4. **Test-data cleanup.** Run `tests/cleanup.sql` (deletes need approval in the Supabase connector).
 
+
+## Security and sanity layer (19 Oct, after the independent audit)
+- **Leak fixed:** tool versions are staff-only (RLS). Check results and import source live in the staff-only `tool_version_admin` table.
+- **Monitor:** `private.run_sanity()` runs hourly via pg_cron (`cil-sanity-hourly`) and writes `health_checks`, shown in Activity → System checks. It checks RLS on every table, browser read-only, every live record placed, no roll numbers in group-visible records, valid member IDs, one live version per tool, valid role emails, and refusal spikes.
+- **Engine v5:**
+  - own-property dispatch; JSON-object body; 6 MB cap; sheet shape limits;
+  - typed form fields; 20 submits/hour per student; strict emails;
+  - slug lock; race-safe publish; publish blocked if a group-visible record has a roll number.
+- **Seating reader:** reads C.R./Room/Classroom and R-N/Row.N; flags every unrecognised column-A cell and unlabeled roll rows; each sheet needs explicit confirmation per file.
+- **Region:** the page calls the engine with `?forceFunctionRegion=ap-south-1` (Mumbai, next to the DB): ~1 s instead of 5–10 s.
+- **Verification:** 14/14 fix probes pass, and the live suite passes 50/50.
+- **Pending owner approval** (Supabase prompts are being cancelled before they reach Abhinay):
+  1. Revoke browser INSERT/UPDATE/DELETE/TRUNCATE grants and the column SELECT on `tool_versions.checks/source`. RLS already blocks these; this is the backstop. SQL is in `supabase/migrations/04_guards_and_sanity.sql`.
+  2. Test-data cleanup (`tests/cleanup.sql`, plus `cil-audit-%` tools).
+  3. `OPENAI_API_KEY`: add it in Supabase → Edge Functions → Secrets. The key pasted in chat should be rotated.
+- **Known gap:** every invigilator sees every room's roster; limiting this needs room-assignment data.
+- **Vision vs path:** the free tiers and the frozen stack are economics and sequencing, not vision. See the project document.
+
 ## Constraints (unchanged)
 - Never ask for secrets in chat.
 - Real data is visible only to campus sign-ins, and each student sees only their own seat.
