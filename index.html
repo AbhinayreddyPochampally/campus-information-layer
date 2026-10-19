@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Campus Information Layer</title>
+<meta name="robots" content="noindex">
+<style>
+:root{--bg:#eef1ec;--card:#fff;--ink:#16201b;--muted:#5d6a63;--line:#dfe5df;--accent:#1f5c43;--accent-soft:#e3efe8;--warn:#9a5b00;--warn-soft:#fbefd9;--bad:#a8332b;--bad-soft:#f8e3e1;--chip:#f4f6f3;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#121815;--card:#1b231f;--ink:#e6ece8;--muted:#9aa8a0;--line:#2c3732;--accent:#7cc4a0;--accent-soft:#20352b;--warn:#e0b060;--warn-soft:#3a2f1c;--bad:#f0918a;--bad-soft:#3d2422;--chip:#232d28}}
+*{box-sizing:border-box}html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{background:var(--card);border-bottom:1px solid var(--line);padding:14px 16px}
+.wrap{max-width:980px;margin:0 auto;padding:0 16px}
+header .wrap{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:0}
+h1{font-size:20px;margin:0}h2{font-size:26px;margin:18px 0 2px}h3{font-size:17px;margin:0 0 10px}
+.sub{color:var(--muted);font-size:13px}
+main{padding:16px 0 48px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin:14px 0}
+.item{border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:8px 0}
+.item.hi{border-color:var(--accent)}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.row.sp{justify-content:space-between}
+.mono{font-family:var(--mono);font-size:13px}
+.pill{display:inline-block;border-radius:999px;padding:1px 9px;font-size:12px;background:var(--chip);color:var(--muted)}
+.pill.ok{background:var(--accent-soft);color:var(--accent)}.pill.warn{background:var(--warn-soft);color:var(--warn)}.pill.bad{background:var(--bad-soft);color:var(--bad)}
+nav.tabs{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 2px}
+nav.tabs button{border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:999px;padding:6px 14px;font:inherit;cursor:pointer}
+nav.tabs button[aria-pressed=true]{background:var(--ink);color:var(--card);border-color:var(--ink)}
+button.b,label.b{border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:9px;padding:8px 14px;font:inherit;cursor:pointer;display:inline-block}
+button.p{background:var(--accent);border-color:var(--accent);color:#fff}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]) button.p{color:#0d1511}}
+button:disabled{opacity:.5;cursor:not-allowed}
+input,select,textarea{font:inherit;color:var(--ink);background:var(--card);border:1px solid var(--line);border-radius:9px;padding:8px 10px;max-width:100%}
+input:focus,select:focus,textarea:focus,button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+textarea{width:100%;min-height:70px}
+table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:500;font-size:12px}
+.scroll{overflow-x:auto}
+.big{font-size:22px;font-weight:600;font-family:var(--mono)}
+.err{color:var(--bad)}.okc{color:var(--accent)}
+.toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:var(--ink);color:var(--card);padding:9px 16px;border-radius:9px;font-size:14px;display:none;max-width:90vw}
+.hide{display:none!important}
+details summary{cursor:pointer;color:var(--muted)}
+.login{max-width:420px;margin:40px auto}
+.login input{width:100%;margin:6px 0 10px}
+.muted{color:var(--muted)}
+</style>
+</head>
+<body>
+<header><div class="wrap"><div><h1>Campus Information Layer</h1><div class="sub" id="orgline">Sign in with your campus email</div></div>
+<div class="row" id="who"></div></div></header>
+<main class="wrap" id="app"></main>
+<div class="toast" id="toast" role="status"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script>
+const SB_URL = "https://didzhikknwbfklyjwumd.supabase.co";
+const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRpZHpoaWtrbndiZmtseWp3dW1kIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTIzNDUwNjYsImV4cCI6MjEwNzkyMTA2Nn0.CZRwPMRCzvrfDEuVzXyqIfRPbhpAltBAKxXeLzkLeOw";
+const SEATING_TOOL = new URLSearchParams(location.search).get("tool") || "exam-seating"; // ?tool= is only for test runs; the engine still checks every call
+const sb = supabase.createClient(SB_URL, SB_KEY, { auth: { persistSession: true, autoRefreshToken: true } });
+const $ = s => document.querySelector(s), app = $("#app");
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const toast = m => { const t = $("#toast"); t.textContent = m; t.style.display = "block"; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = "none", 3500); };
+const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+const fmtDate = iso => iso ? new Date(iso + "T00:00:00").toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" }) : "Date to be confirmed";
+const fmtTs = ts => new Date(ts).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+let ME = null, VIEW = "today", ADMIN_AS_STUDENT = false;
+
+async function engine(body) {
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) throw new Error("Sign in again.");
+  const r = await fetch(`${SB_URL}/functions/v1/engine`, { method: "POST", headers: { Authorization: `Bearer ${session.access_token}`, apikey: SB_KEY, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({ ok: false, reason: `Server returned ${r.status}` }));
+  return j;
+}
+
+// ---------------- sign-in (email one-time code) ----------------
+function renderLogin(step = "email", email = "", msg = "") {
+  $("#who").innerHTML = ""; $("#orgline").textContent = "Sign in with your campus email";
+  app.innerHTML = `<div class="card login"><h3>Sign in</h3>
+  ${step === "email" ? `<p class="sub">We'll email you a 6-digit code. Only campus emails can sign in.</p>
+    <form id="f1"><label for="em">Campus email</label><input id="em" type="email" autocomplete="email" required placeholder="name.rollnumber@iimmumbai.ac.in" value="${esc(email)}">
+    <button class="b p" type="submit">Send code</button></form>`
+  : `<p class="sub">Code sent to <b>${esc(email)}</b>. It can take a minute; check spam too.</p>
+    <form id="f2"><label for="code">6-digit code</label><input id="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6,10}" required>
+    <div class="row"><button class="b p" type="submit">Sign in</button><button class="b" type="button" id="back">Use another email</button></div></form>`}
+  <p class="err" id="lmsg">${esc(msg)}</p></div>`;
+  if (step === "email") $("#f1").onsubmit = async e => {
+    e.preventDefault(); const em = $("#em").value.trim().toLowerCase(); $("#lmsg").textContent = "";
+    const btn = e.submitter; btn.disabled = true;
+    const { error } = await sb.auth.signInWithOtp({ email: em, options: { shouldCreateUser: true } });
+    btn.disabled = false;
+    if (error) return renderLogin("email", em, /database error|saving new user/i.test(error.message) ? "This email isn't part of a configured campus. Use your campus email." : error.message);
+    renderLogin("code", em);
+  };
+  else {
+    $("#back").onclick = () => renderLogin("email", email);
+    $("#f2").onsubmit = async e => {
+      e.preventDefault(); const btn = e.submitter; btn.disabled = true;
+      const { error } = await sb.auth.verifyOtp({ email, token: $("#code").value.trim(), type: "email" });
+      btn.disabled = false;
+      if (error) return renderLogin("code", email, "That code didn't work. Check it, or send a new one.");
+      boot();
+    };
+  }
+}
+
+// ---------------- who am I ----------------
+async function loadMe() {
+  const { data: { user } } = await sb.auth.getUser(); if (!user) return null;
+  const { data: prof } = await sb.from("profiles").select("email, member_id, org_id").eq("id", user.id).maybeSingle();
+  if (!prof) return { user, noProfile: true };
+  const { data: org } = await sb.from("organizations").select("id, name, roles, staff_roles, default_role").eq("id", prof.org_id).maybeSingle();
+  const { data: mem } = await sb.from("memberships").select("role").eq("email", prof.email).maybeSingle();
+  const role = mem?.role || org.default_role;
+  return { user, ...prof, org, role, staff: org.staff_roles.includes(role), admin: role === "admin" };
+}
+
+async function boot() {
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) return renderLogin();
+  ME = await loadMe();
+  if (!ME || ME.noProfile) { app.innerHTML = `<div class="card">Your account isn't linked to a campus. <button class="b" id="so">Sign out</button></div>`; $("#so").onclick = signOut; return; }
+  $("#orgline").textContent = `${ME.org.name} · ${ME.member_id ? "Roll " + ME.member_id + " · " : ""}${ME.role}`;
+  $("#who").innerHTML = `<span class="sub">${esc(ME.email)}</span><button class="b" id="so">Sign out</button>`;
+  $("#so").onclick = signOut;
+  VIEW = ME.staff ? "seating" : "today";
+  render();
+}
+async function signOut() { await sb.auth.signOut(); ME = null; renderLogin(); }
+
+function render() {
+  const tabs = ME.staff
+    ? [["seating", "Exam seating"], ["roles", "Roles"], ["activity", "Activity"], ["today", "My view"]]
+    : [["today", "Today"]];
+  app.innerHTML = `${tabs.length > 1 ? `<nav class="tabs" aria-label="Sections">${tabs.map(([k, l]) => `<button data-v="${k}" aria-pressed="${VIEW === k}">${l}</button>`).join("")}</nav>` : ""}<div id="view"></div>`;
+  app.querySelectorAll("nav.tabs button").forEach(b => b.onclick = () => { VIEW = b.dataset.v; render(); });
+  ({ today: viewToday, seating: viewSeating, roles: viewRoles, activity: viewActivity }[VIEW])();
+}
+
+// ---------------- student / invigilator view ----------------
+async function viewToday() {
+  const v = $("#view"); v.innerHTML = `<p class="sub">Loading…</p>`;
+  // Only published records the database lets this person see: own seats, rosters for their role, notices to everyone.
+  let q = sb.from("records").select("id, entity, subject_member_id, audience, data, state, created_at, tool_versions!inner(status)").eq("tool_versions.status", "published").order("created_at", { ascending: false }).limit(500);
+  if (ME.staff) q = q.or(`subject_member_id.eq.${ME.member_id || "none"},audience.cs.{everyone}`);
+  const { data, error } = await q;
+  if (error) { v.innerHTML = `<div class="card err">Couldn't load: ${esc(error.message)}</div>`; return; }
+  const t = todayISO();
+  const seats = data.filter(r => r.entity === "Seat").sort((a, b) => (a.data.date + a.data.start).localeCompare(b.data.date + b.data.start));
+  const rosters = data.filter(r => r.entity === "Roster").sort((a, b) => (a.data.date + a.data.start + a.data.room).localeCompare(b.data.date + b.data.start + b.data.room));
+  const notices = data.filter(r => r.entity === "Notice" || r.entity === "_notice");
+  const todays = seats.filter(s => s.data.date === t), upcoming = seats.filter(s => s.data.date > t), past = seats.filter(s => s.data.date && s.data.date < t);
+  const seatCard = (s, hi) => `<div class="item ${hi ? "hi" : ""}">
+    <div class="row sp"><span class="mono">${esc(s.data.start)}–${esc(s.data.end)} · ${fmtDate(s.data.date)}</span><span class="pill">${esc(s.data.exam || "Exam")}</span></div>
+    <div class="row sp" style="align-items:flex-end;margin-top:4px;flex-wrap:nowrap"><b style="flex:1">${esc(s.data.courses || s.data.exam)}</b><span style="white-space:nowrap"><span class="sub">Room</span> <span class="big">${esc(s.data.room)}</span></span></div>
+    <div class="mono sub">Row ${esc(s.data.row)} · Column ${esc(s.data.col)}</div></div>`;
+  const hour = new Date().getHours();
+  v.innerHTML = `<h2>${hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening"}</h2><p class="sub">${fmtDate(t)} · what needs you today.</p>
+  ${notices.length ? `<div class="card"><h3>Notices</h3>${notices.map(n => `<div class="item"><span class="pill ok">${n.entity === "Notice" ? "Exam Cell" : "Decision"}</span> <b>${esc(n.data.title || "")}</b><div>${esc(n.data.body || n.data.text || "")}</div></div>`).join("")}</div>` : ""}
+  <div class="card"><h3>Today's exams</h3>${todays.length ? todays.map(s => seatCard(s, true)).join("") : `<p class="sub">No exams today.</p>`}</div>
+  ${upcoming.length ? `<div class="card"><h3>Coming up</h3>${upcoming.map(s => seatCard(s)).join("")}</div>` : ""}
+  ${rosters.length ? `<div class="card"><h3>Room rosters</h3>${rosters.filter(r => !r.data.date || r.data.date >= t).map(r => `<div class="item"><div class="row sp"><b>Room ${esc(r.data.room)} · ${esc(r.data.courses)}</b><span class="mono">${fmtDate(r.data.date)} ${esc(r.data.start)}–${esc(r.data.end)}</span></div><div class="sub">${esc(r.data.students)} students</div><details><summary>Seat map</summary><p class="mono">${esc(r.data.seats)}</p></details></div>`).join("") || `<p class="sub">No upcoming rosters.</p>`}</div>` : ""}
+  ${past.length ? `<div class="card"><details><summary>Past exams (${past.length})</summary>${past.reverse().map(s => seatCard(s)).join("")}</details></div>` : ""}
+  ${!seats.length && !rosters.length && !notices.length ? `<div class="card"><p>Nothing for you yet. When the Exam Cell publishes seating, your seat shows here.</p>${ME.member_id ? "" : `<p class="sub">Your email has no roll number, so personal seats can't be matched to you.</p>`}</div>` : ""}`;
+}
+
+// ---------------- admin: seating import -> checks -> publish ----------------
+let IMPORT = { files: [], sheets: {}, cfg: { year: new Date().getFullYear(), sheets: {}, acks: {} }, result: null, notice: { title: "", body: "" } };
+async function viewSeating() {
+  const v = $("#view"); v.innerHTML = `<p class="sub">Loading…</p>`;
+  const { data: tool } = await sb.from("tools").select("id, name").eq("slug", SEATING_TOOL).maybeSingle();
+  let versions = [];
+  if (tool) versions = (await sb.from("tool_versions").select("id, version, status, checks, source, published_at").eq("tool_id", tool.id).order("version", { ascending: false }).limit(5)).data || [];
+  const live = versions.find(x => x.status === "published");
+  // remember confirmed sheet settings from the last import
+  const last = versions[0];
+  if (last?.source?.cfg?.sheets && !Object.keys(IMPORT.cfg.sheets).length) IMPORT.cfg.sheets = { ...last.source.cfg.sheets };
+  const r = IMPORT.result;
+  v.innerHTML = `<h2>Exam seating</h2><p class="sub">Upload the Exam Cell's workbook(s). Nothing is visible to students until you publish.</p>
+  <div class="card"><div class="row sp"><h3>Live now</h3>${live ? `<span class="pill ok">v${live.version} live</span>` : `<span class="pill">nothing live</span>`}</div>
+   ${live ? `<p>${live.checks?.summary?.seats ?? "?"} seats for ${live.checks?.summary?.students ?? "?"} students across ${live.checks?.summary?.rooms ?? "?"} rooms · published ${fmtTs(live.published_at)}<br><span class="sub">${esc((live.source?.files || []).join(", "))}</span></p>` : `<p class="sub">No seating has been published yet.</p>`}</div>
+  <div class="card"><h3>1 · Choose files</h3>
+   <label class="b" for="xl">Choose .xlsx files</label> <input id="xl" class="hide" type="file" accept=".xlsx,.xls" multiple>
+   <span class="sub" id="fl">${IMPORT.files.length ? esc(IMPORT.files.join(", ")) + ` · ${Object.keys(IMPORT.sheets).length} sheets` : "No file chosen"}</span></div>
+  <div class="card ${Object.keys(IMPORT.sheets).length ? "" : "hide"}"><h3>2 · Confirm each sheet</h3>
+   <p class="sub">The file doesn't say the date or time for certain; the sheet name is only a hint. Confirm them once and they're remembered.</p>
+   <div class="scroll"><table><thead><tr><th>Sheet</th><th>Exam</th><th>Date</th><th>Start</th><th>End</th></tr></thead><tbody>
+   ${Object.keys(IMPORT.sheets).map((s, i) => { const c = IMPORT.cfg.sheets[s] || proposal(s) || {}; return `<tr data-s="${i}"><td class="mono">${esc(s)}</td>
+     <td><input data-k="exam" value="${esc(c.exam || "")}" placeholder="Mid-term" size="12"></td><td><input data-k="date" type="date" value="${esc(c.date || "")}"></td>
+     <td><input data-k="start" type="time" value="${esc(c.start || "")}"></td><td><input data-k="end" type="time" value="${esc(c.end || "")}"></td></tr>`; }).join("")}
+   </tbody></table></div>
+   <h3 style="margin-top:14px">Notice to everyone <span class="sub">(optional)</span></h3>
+   <input id="nt" placeholder="Title" value="${esc(IMPORT.notice.title)}" style="width:100%;margin-bottom:6px"><textarea id="nb" placeholder="e.g. Report 15 minutes early. Carry your ID card.">${esc(IMPORT.notice.body)}</textarea>
+   <p><button class="b p" id="chk">Check</button></p></div>
+  <div class="card ${r ? "" : "hide"}" id="res"><h3>3 · Checks</h3>${r ? renderResult(r) : ""}</div>
+  ${versions.length ? `<div class="card"><details><summary>Version history</summary><table><tbody>${versions.map(x => `<tr><td>v${x.version}</td><td><span class="pill ${x.status === "published" ? "ok" : x.status === "draft" ? "warn" : ""}">${x.status}</span></td><td class="sub">${esc((x.source?.files || []).join(", "))}</td><td class="sub">${x.checks?.summary?.seats ?? ""} seats</td></tr>`).join("")}</tbody></table></details></div>` : ""}`;
+  $("#xl").onchange = readFiles;
+  if ($("#chk")) $("#chk").onclick = runCheck;
+  if ($("#pub")) $("#pub").onclick = () => publish($("#pub").dataset.v);
+  v.querySelectorAll("input[data-ack]").forEach(cb => cb.onchange = () => { if (cb.checked) IMPORT.cfg.acks[cb.dataset.ack] = true; else delete IMPORT.cfg.acks[cb.dataset.ack]; });
+}
+function proposal(sheet) { const f = (IMPORT.result?.flags || []).find(x => x.type === "sheet" && x.sheet === sheet); return f ? { ...f.proposal, exam: f.proposal.exam || "" } : null; }
+function renderResult(r) {
+  const open = r.flags.filter(f => !f.resolved);
+  const s = r.summary;
+  return `<p>${s.seats} seats · ${s.students} students · ${s.rooms} rooms · ${s.rosters} invigilator rosters · ${s.notices} notice</p>
+  ${open.length ? `<p><span class="pill warn">${open.length} to resolve</span> Publishing is blocked until these are settled.</p>
+    ${open.slice(0, 60).map(f => `<div class="item"><span class="pill ${f.type === "sheet" ? "warn" : "bad"}">${esc(f.type)}</span> ${esc(f.message)}
+      ${f.ackable ? `<div><label><input type="checkbox" data-ack="${esc(f.key)}" ${IMPORT.cfg.acks[f.key] ? "checked" : ""}> This is correct as printed (acknowledge)</label></div>` : ""}</div>`).join("")}
+    ${open.length > 60 ? `<p class="sub">…and ${open.length - 60} more.</p>` : ""}
+    <p class="sub">Fix the sheet settings above or the file itself, then press Check again.</p>`
+  : `<p class="okc">All checks pass. Draft v${r.version} is ready.</p><p><button class="b p" id="pub" data-v="${r.version_id}">Publish v${r.version} to students</button></p>
+     <p class="sub">Publishing replaces the live version. Each student will see only their own seat.</p>`}`;
+}
+async function readFiles(e) {
+  const files = [...e.target.files]; if (!files.length) return;
+  IMPORT.sheets = {}; IMPORT.files = files.map(f => f.name); IMPORT.result = null;
+  for (const f of files) {
+    const wb = XLSX.read(await f.arrayBuffer(), { type: "array" });
+    wb.SheetNames.forEach(n => {
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, defval: "", raw: false }).map(r => r.map(c => String(c).trim()));
+      const key = IMPORT.sheets[n] ? `${n} (${f.name})` : n;
+      if (rows.some(r => r.some(c => /^CR\s*-?\s*\d+/i.test(c)))) IMPORT.sheets[key] = rows; // seating sheets only
+    });
+  }
+  if (!Object.keys(IMPORT.sheets).length) { toast("No seating sheets found (rooms like CR-305 in column A)."); return viewSeating(); }
+  await runCheck(true);
+}
+function collectCfg() {
+  const names = Object.keys(IMPORT.sheets);
+  document.querySelectorAll("tr[data-s]").forEach(tr => {
+    const n = names[+tr.dataset.s], c = {};
+    tr.querySelectorAll("input[data-k]").forEach(i => c[i.dataset.k] = i.value.trim());
+    if (c.date && c.start && c.end) IMPORT.cfg.sheets[n] = c; else delete IMPORT.cfg.sheets[n];
+  });
+  IMPORT.notice = { title: ($("#nt")?.value || "").trim(), body: ($("#nb")?.value || "").trim() };
+}
+async function runCheck(first) {
+  if (first !== true) collectCfg();
+  const btn = $("#chk"); if (btn) btn.disabled = true;
+  toast("Checking…");
+  const res = await engine({ action: "import", tool: SEATING_TOOL, adapter: "seating", files: IMPORT.files, sheets: IMPORT.sheets, cfg: IMPORT.cfg, notice: IMPORT.notice });
+  if (!res.ok) { toast(res.reason); if (btn) btn.disabled = false; return; }
+  IMPORT.result = res.result;
+  toast(res.result.issues ? `${res.result.issues} to resolve` : "All checks pass");
+  viewSeating();
+}
+async function publish(versionId) {
+  if (!confirm("Publish this seating? Students will see their seats right away.")) return;
+  const res = await engine({ action: "publish", version_id: versionId });
+  if (!res.ok) return toast(res.reason);
+  toast(`Published v${res.result.published}${res.result.retired ? `, v${res.result.retired} retired` : ""}`);
+  IMPORT = { files: [], sheets: {}, cfg: { year: new Date().getFullYear(), sheets: {}, acks: {} }, result: null, notice: { title: "", body: "" } };
+  viewSeating();
+}
+
+// ---------------- admin: roles ----------------
+async function viewRoles() {
+  const v = $("#view");
+  const { data: mems } = await sb.from("memberships").select("email, role, added_at").order("role");
+  v.innerHTML = `<h2>Roles</h2><p class="sub">Anyone with a campus email is a <b>${esc(ME.org.default_role)}</b> unless listed here.</p>
+  <div class="card"><h3>Assign a role</h3>${ME.admin ? `<form id="rf" class="row"><input id="re" type="email" required placeholder="name.roll@iimmumbai.ac.in" style="flex:1;min-width:220px">
+   <select id="rr">${ME.org.roles.map(r => `<option>${esc(r)}</option>`).join("")}</select><button class="b p">Save</button></form>` : `<p class="sub">Only an admin can change roles.</p>`}</div>
+  <div class="card scroll"><table><thead><tr><th>Email</th><th>Role</th><th>Since</th></tr></thead><tbody>${(mems || []).map(m => `<tr><td>${esc(m.email)}</td><td><span class="pill">${esc(m.role)}</span></td><td class="sub">${fmtTs(m.added_at)}</td></tr>`).join("")}</tbody></table></div>`;
+  if ($("#rf")) $("#rf").onsubmit = async e => { e.preventDefault(); const res = await engine({ action: "set_role", email: $("#re").value, role: $("#rr").value }); toast(res.ok ? `${res.result.email} is now ${res.result.role}` : res.reason); if (res.ok) viewRoles(); };
+}
+
+// ---------------- admin: activity ----------------
+async function viewActivity() {
+  const v = $("#view");
+  const [{ data: au }, { data: rf }] = await Promise.all([
+    sb.from("audit_log").select("action, detail, at").order("at", { ascending: false }).limit(40),
+    sb.from("refusals").select("action, reason, at").order("at", { ascending: false }).limit(40)]);
+  const line = a => a.action === "import" ? `Import v${a.detail.version}: ${a.detail.summary?.seats} seats, ${a.detail.issues} issue(s)` : a.action === "publish" ? `Published v${a.detail.version} (${a.detail.records} records)` : a.action === "set_role" ? `${a.detail.email}: ${a.detail.before} → ${a.detail.after}` : a.action === "transition" ? `${a.detail.step}: ${a.detail.before?.state} → ${a.detail.after?.state}` : a.action;
+  v.innerHTML = `<h2>Activity</h2><div class="card scroll"><h3>Changes</h3><table><tbody>${(au || []).map(a => `<tr><td class="mono">${fmtTs(a.at)}</td><td>${esc(line(a))}</td></tr>`).join("") || `<tr><td class="sub">Nothing yet.</td></tr>`}</tbody></table></div>
+  <div class="card scroll"><h3>Refused calls</h3><table><tbody>${(rf || []).map(a => `<tr><td class="mono">${fmtTs(a.at)}</td><td><span class="pill bad">${esc(a.action)}</span></td><td>${esc(a.reason)}</td></tr>`).join("") || `<tr><td class="sub">None.</td></tr>`}</tbody></table></div>`;
+}
+
+sb.auth.onAuthStateChange((ev) => { if (ev === "SIGNED_OUT") renderLogin(); });
+boot();
+</script>
+</body>
+</html>
