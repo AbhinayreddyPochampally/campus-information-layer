@@ -71,7 +71,8 @@ async function engine(body) {
   const { data: { session } } = await sb.auth.getSession();
   if (!session) throw new Error("Sign in again.");
   try {
-    const r = await fetch(`${SB_URL}/functions/v1/engine`, { method: "POST", headers: { Authorization: `Bearer ${session.access_token}`, apikey: SB_KEY, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const r = await fetch(`${SB_URL}/functions/v1/engine?forceFunctionRegion=ap-south-1`, // run next to the database (Mumbai)
+       { method: "POST", headers: { Authorization: `Bearer ${session.access_token}`, apikey: SB_KEY, "Content-Type": "application/json" }, body: JSON.stringify(body) });
     return await r.json().catch(() => ({ ok: false, reason: `Server returned ${r.status}` }));
   } catch (e) { return { ok: false, reason: "Couldn't reach the server. Check your connection and try again." }; }
 }

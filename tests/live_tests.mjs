@@ -10,7 +10,7 @@ const client = () => createClient(URL_, ANON, { auth: { persistSession: false, a
 async function login(email) { const c = client(); const { error } = await c.auth.signInWithPassword({ email, password: PW }); if (error) throw new Error(`${email}: ${error.message}`); return c; }
 const U = {}; for (const [k, e] of Object.entries(E)) U[k] = await login(e);
 const anon = client();
-const call = async (c, body) => { const { data: s } = await c.auth.getSession(); const r = await fetch(`${URL_}/functions/v1/engine`, { method: "POST", headers: { Authorization: `Bearer ${s.session.access_token}`, apikey: ANON, "Content-Type": "application/json" }, body: JSON.stringify(body) }); return r.json(); };
+const call = async (c, body) => { const { data: s } = await c.auth.getSession(); const r = await fetch(`${URL_}/functions/v1/engine?forceFunctionRegion=ap-south-1`, { method: "POST", headers: { Authorization: `Bearer ${s.session.access_token}`, apikey: ANON, "Content-Type": "application/json" }, body: JSON.stringify(body) }); return r.json(); };
 const rows = async (c, q) => { const { data, error } = await q(c.from("records")); if (error) throw error; return data; };
 const refusalCount = async () => { const { count } = await U.admin.from("refusals").select("*", { count: "exact", head: true }); return count; };
 const recordCount = async () => { const { count } = await U.admin.from("records").select("*", { count: "exact", head: true }); return count; };
@@ -34,7 +34,7 @@ ok("Engine: import with unconfirmed sheets reports open issues", r.ok && r.resul
 const v0 = r.result?.version_id;
 r = await call(U.admin, { action: "publish", version_id: v0 });
 ok("Engine: publish gate fails closed while issues are open", !r.ok && /open issue/.test(r.reason), r.reason);
-const cfg = { year: 2026, sheets: { "GP9_20th oct_9.30 to 10.30": { exam: "Mid-term (test)", date: "2026-10-20", start: "09:30", end: "10:30" }, "GP8_20th Oct _2.30 to 3.30": { exam: "Mid-term (test)", date: "2026-10-20", start: "14:30", end: "15:30" } } };
+const cfg = { year: 2026, sheets: { "GP9_20th oct_9.30 to 10.30": { exam: "Mid-term (test)", date: "2026-10-20", start: "09:30", end: "10:30", confirmed: true }, "GP8_20th Oct _2.30 to 3.30": { exam: "Mid-term (test)", date: "2026-10-20", start: "14:30", end: "15:30", confirmed: true } } };
 r = await call(U.admin, { action: "import", tool: SEAT, adapter: "seating", sheets, cfg, notice: { title: "Test notice", body: "Report to your allotted room only." } });
 ok("Engine: import with confirmed sheets has zero issues", r.ok && r.result.issues === 0 && r.result.summary.rosters === 2 && r.result.summary.notices === 1, JSON.stringify(r).slice(0, 300));
 const v1 = r.result?.version_id, seatTool = r.result?.tool_id;
