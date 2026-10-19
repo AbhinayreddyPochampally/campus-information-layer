@@ -134,11 +134,11 @@ async function signOut() { await sb.auth.signOut(); ME = null; renderLogin(); }
 
 function render() {
   const tabs = ME.staff
-    ? [["seating", "Exam seating"], ["roles", "Roles"], ["activity", "Activity"], ["today", "My view"]]
-    : [["today", "Today"]];
+    ? [["seating", "Exam seating"], ["tools", "Tools"], ["build", "Build a tool"], ["roles", "Roles"], ["activity", "Activity"], ["today", "My view"]]
+    : [["today", "Today"], ["requests", "Requests"]];
   app.innerHTML = `${tabs.length > 1 ? `<nav class="tabs" aria-label="Sections">${tabs.map(([k, l]) => `<button data-v="${k}" aria-pressed="${VIEW === k}">${l}</button>`).join("")}</nav>` : ""}<div id="view"></div>`;
   app.querySelectorAll("nav.tabs button").forEach(b => b.onclick = () => { VIEW = b.dataset.v; render(); });
-  ({ today: viewToday, seating: viewSeating, roles: viewRoles, activity: viewActivity }[VIEW])();
+  ({ today: viewToday, requests: viewRequests, seating: viewSeating, tools: viewTools, build: viewBuild, roles: viewRoles, activity: viewActivity }[VIEW])();
 }
 
 // ---------------- student / invigilator view ----------------
@@ -160,6 +160,7 @@ async function viewToday() {
     <div class="row sp" style="align-items:flex-end;margin-top:4px;flex-wrap:nowrap"><b style="flex:1">${esc(s.data.courses || s.data.exam)}</b><span style="white-space:nowrap"><span class="sub">Room</span> <span class="big">${esc(s.data.room)}</span></span></div>
     <div class="mono sub">Row ${esc(s.data.row)} · Column ${esc(s.data.col)}</div></div>`;
   const hour = new Date().getHours();
+  if (!v.isConnected) return; // the person switched tabs while this was loading
   v.innerHTML = `<h2>${hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening"}</h2><p class="sub">${fmtDate(t)} · what needs you today.</p>
   ${notices.length ? `<div class="card"><h3>Notices</h3>${notices.map(n => `<div class="item"><span class="pill ok">${n.entity === "Notice" ? "Exam Cell" : "Decision"}</span> <b>${esc(n.data.title || "")}</b><div>${esc(n.data.body || n.data.text || "")}</div></div>`).join("")}</div>` : ""}
   <div class="card"><h3>Today's exams</h3>${todays.length ? todays.map(s => seatCard(s, true)).join("") : `<p class="sub">No exams today.</p>`}</div>
@@ -186,6 +187,7 @@ async function viewSeating() {
   // Prefill from the last import, but every sheet must be confirmed again for this file.
   if (last?.source?.cfg?.sheets && !Object.keys(IMPORT.cfg.sheets).length) IMPORT.cfg.sheets = Object.fromEntries(Object.entries(last.source.cfg.sheets).map(([k, c]) => [k, { ...c, confirmed: false }]));
   const r = IMPORT.result;
+  if (!v.isConnected) return; // the person switched tabs while this was loading
   v.innerHTML = `<h2>Exam seating</h2><p class="sub">Upload the Exam Cell's workbook(s). Nothing is visible to students until you publish.</p>
   <div class="card"><div class="row sp"><h3>Live now</h3>${live ? `<span class="pill ok">v${live.version} live</span>` : `<span class="pill">nothing live</span>`}</div>
    ${live ? `<p>${live.checks?.summary?.seats ?? "?"} seats for ${live.checks?.summary?.students ?? "?"} students across ${live.checks?.summary?.rooms ?? "?"} rooms · published ${fmtTs(live.published_at)}<br><span class="sub">${esc((live.source?.files || []).join(", "))}</span></p>` : `<p class="sub">No seating has been published yet.</p>`}</div>
@@ -277,6 +279,7 @@ async function publish(versionId) {
 async function viewRoles() {
   const v = $("#view");
   const { data: mems } = await sb.from("memberships").select("email, role, added_at").order("role");
+  if (!v.isConnected) return; // the person switched tabs while this was loading
   v.innerHTML = `<h2>Roles</h2><p class="sub">Anyone with a campus email is a <b>${esc(ME.org.default_role)}</b> unless listed here.</p>
   <div class="card"><h3>Assign a role</h3>${ME.admin ? `<form id="rf" class="row"><input id="re" type="email" required placeholder="name.roll@iimmumbai.ac.in" style="flex:1;min-width:220px">
    <select id="rr">${ME.org.roles.map(r => `<option>${esc(r)}</option>`).join("")}</select><button class="b p">Save</button></form>` : `<p class="sub">Only an admin can change roles.</p>`}</div>
@@ -295,8 +298,135 @@ async function viewActivity() {
   const latest = (hc || []).filter(x => x.run_id === (hc || [])[0]?.run_id);
   const bad = latest.filter(x => x.severity !== "ok");
   const health = latest.length ? `<div class="card"><div class="row sp"><h3>System checks</h3><span class="pill ${bad.some(x => x.severity === "critical") ? "bad" : bad.length ? "warn" : "ok"}">${bad.length ? `${bad.length} need attention` : "all passing"}</span></div><p class="sub">Run automatically every hour · last run ${fmtTs(latest[0].ran_at)}</p><table><tbody>${latest.map(x => `<tr><td><span class="pill ${x.severity === "ok" ? "ok" : x.severity === "critical" ? "bad" : "warn"}">${esc(x.severity)}</span></td><td>${esc(x.check_name)}</td><td class="mono">${x.count || ""}</td></tr>`).join("")}</tbody></table></div>` : `<div class="card sub">System checks have not run yet.</div>`;
+  if (!v.isConnected) return; // the person switched tabs while this was loading
   v.innerHTML = `<h2>Activity</h2>${health}<div class="card scroll"><h3>Changes</h3><table><tbody>${(au || []).map(a => `<tr><td class="mono">${fmtTs(a.at)}</td><td>${esc(line(a))}</td></tr>`).join("") || `<tr><td class="sub">Nothing yet.</td></tr>`}</tbody></table></div>
   <div class="card scroll"><h3>Refused calls</h3><table><tbody>${(rf || []).map(a => `<tr><td class="mono">${fmtTs(a.at)}</td><td><span class="pill bad">${esc(a.action)}</span></td><td>${esc(a.reason)}</td></tr>`).join("") || `<tr><td class="sub">None.</td></tr>`}</tbody></table></div>`;
+}
+
+// ---------------- tools built from specs: plain-English review, forms, queues ----------------
+const SCOPE_WORDS = { own: "only their own", all: "all of them", none: "none" };
+function describeSpec(spec) {
+  const ents = spec.entities || {}, wf = spec.workflow;
+  const forms = (spec.inputs || []).filter(i => i.kind === "form").map(i => `<li><b>${esc(i.role)}s</b> fill in “${esc(i.label || spec.name)}”: ${(i.fields || []).map(f => esc(((ents[i.entity] || {}).fields || {})[f]?.label || f)).join(", ")}</li>`).join("");
+  const rules = (spec.rules || []).map(r => `<li><b>${esc(r.label || r.id)}</b>: ${esc(ruleWords(spec, r))}</li>`).join("");
+  const steps = wf ? (wf.transitions || []).map(t => `<li><b>${esc(t.role)}</b> can <b>${esc(t.label || t.action)}</b>: ${esc(t.from)} → ${esc(t.to)}${t.checkRules ? " (re-checks every rule first)" : ""}${t.needsNote ? " (needs a reason)" : ""}</li>`).join("") : "";
+  const access = Object.entries(spec.access || {}).map(([en, a]) => `<li>${esc((ents[en] || {}).label || en)}: ${Object.entries(a.view || {}).filter(([, sc]) => sc !== "none").map(([r, sc]) => `${esc(r)} see ${esc(SCOPE_WORDS[sc] || sc)}`).join("; ") || "staff only"}. Staff see everything.</li>`).join("");
+  const notices = (spec.outputs || []).filter(o => o.kind === "notice").map(o => `<li>${esc(o.label || o.id)} → ${esc(o.audience)}${o.on ? ` when ${o.on.map(esc).join(" or ")}` : ""}</li>`).join("");
+  const unsup = (spec.unsupported || []).map(u => `<li><b>${esc(u.asked)}</b>: ${esc(u.why)} <span class="sub">${esc(u.proposal || "")}</span></li>`).join("");
+  return `<h3>${esc(spec.name)}</h3><p class="sub">${esc(spec.description || "")}</p>
+    ${forms ? `<p><b>Forms</b></p><ul>${forms}</ul>` : ""}${rules ? `<p><b>Checks on every submission</b></p><ul>${rules}</ul>` : ""}
+    ${steps ? `<p><b>Steps</b> (starts as “${esc(wf.initial)}”)</p><ul>${steps}</ul>` : ""}${access ? `<p><b>Who sees what</b></p><ul>${access}</ul>` : ""}
+    ${notices ? `<p><b>Notices</b> (in the app)</p><ul>${notices}</ul>` : ""}${unsup ? `<div class="item"><span class="pill warn">Can't do yet</span><ul>${unsup}</ul></div>` : ""}`;
+}
+function describeChecks(checks) {
+  const tests = (checks && checks.tests) || [];
+  if (!tests.length) return "";
+  const bad = tests.filter(t => !t.pass).length;
+  return `<p><b>Tests generated from the rules</b> <span class="pill ${bad ? "bad" : "ok"}">${bad ? `${bad} failing` : `${tests.length} passing`}</span></p><ul>${tests.map(t => `<li>${t.pass ? "✓" : "✗"} ${esc(t.name)}${t.pass ? "" : ` <span class="sub">(got: ${esc(t.got)})</span>`}</li>`).join("")}</ul>`;
+}
+const OPW_T = { ">": "after", ">=": "on or after", "<": "before", "<=": "on or before", "=": "the same as", "!=": "different from" };
+const OPW_N = { ">": "more than", ">=": "at least", "<": "less than", "<=": "at most", "=": "equal to", "!=": "different from" };
+function ruleWords(spec, r) {
+  const L = f => ((spec.entities[r.entity] || {}).fields || {})[f]?.label || f;
+  const T = f => ["date", "time"].includes(((spec.entities[r.entity] || {}).fields || {})[f]?.type);
+  const OPW = T(r.field || (r.check || {}).field) ? OPW_T : OPW_N;
+  switch (r.kind) {
+    case "required": return `${r.fields.map(L).join(", ")} must be filled in.`;
+    case "compare": return `${L(r.field)} must be ${OPW[r.op] || r.op} ${r.valueField ? L(r.valueField) : r.value === "today" ? "today" : r.value}.`;
+    case "lookup": return r.check ? `${L(r.check.field)} must be ${OPW[r.check.op] || r.check.op} the ${r.check.tableField} of the chosen ${L(r.field)} in ${r.table}.` : `${L(r.field)} must be one of the ${r.table}.`;
+    case "unique": return `No two submissions (from anyone) may share ${r.fields.map(L).join(" + ")}${r.distinct ? ` with a different ${L(r.distinct)}` : ""}.`;
+    case "consistent": return `Every submission with the same ${L(r.key)} must have the same ${L(r.field)}.`;
+    case "no_overlap": return `The same ${L(r.match)} can't be taken twice ${r.range ? `for overlapping ${L(r.range.from)}–${L(r.range.to)}` : "at overlapping times on the same date"}${r.against?.where?.state ? `; only ${r.against.where.state.toUpperCase()} ones count` : "; every existing one counts, whatever its state"}.`;
+    default: return r.kind;
+  }
+}
+let DRAFT = null;
+async function viewBuild() {
+  const v = $("#view");
+  v.innerHTML = `<h2>Build a tool</h2><p class="sub">Describe what you need in plain words. AI drafts it from the system's building blocks; you review it here; nothing is live until you publish.</p>
+  <div class="card"><label for="desc"><b>What should the tool do?</b></label>
+   <textarea id="desc" style="min-height:120px" placeholder="e.g. Students request a room for a club event: purpose, room, date, start and end time, expected attendees. Check the room is big enough and free. The Academic Office approves or rejects with a reason, and the student is told the decision.">${esc(DRAFT?.description || "")}</textarea>
+   <p><button class="b p" id="draft">Draft with AI</button> <span class="sub" id="dmsg"></span></p></div>
+  <div id="drafted">${DRAFT?.result ? draftCard(DRAFT.result) : ""}</div>`;
+  $("#draft").onclick = async () => {
+    const d = $("#desc").value.trim(); if (d.length < 20) return toast("Describe the tool in a sentence or two.");
+    const btn = $("#draft"); btn.disabled = true; $("#dmsg").textContent = "Drafting… this takes 10–30 seconds.";
+    const res = await engine({ action: "draft_tool", description: d });
+    btn.disabled = false; $("#dmsg").textContent = "";
+    if (!res.ok) { toast(res.reason); if (res.detail) $("#drafted").innerHTML = `<div class="card err"><b>${esc(res.reason)}</b><ul>${(Array.isArray(res.detail) ? res.detail : []).map(e => `<li>${esc(typeof e === "string" ? e : e.message || JSON.stringify(e))}</li>`).join("")}</ul></div>`; return; }
+    DRAFT = { description: d, result: res.result }; $("#drafted").innerHTML = draftCard(res.result); wireDraft();
+  };
+  wireDraft();
+}
+function draftCard(r) {
+  return `<div class="card"><div class="row sp"><span class="pill warn">Draft v${r.version} · not live</span><span class="mono sub">${esc(r.spec.id)}</span></div>${describeSpec(r.spec)}${describeChecks(r.checks)}
+   ${ME.admin ? `<p><button class="b p" id="pubtool" data-v="${esc(r.version_id)}" ${r.checks && r.checks.issues ? "disabled" : ""}>Publish this tool</button> <span class="sub">${r.checks && r.checks.issues ? "Fix the failing tests first: describe the tool again more precisely." : "Students will see the form right away."}</span></p>` : `<p class="sub">An admin publishes it.</p>`}
+   <details><summary>Show the exact spec</summary><pre class="mono" style="white-space:pre-wrap;font-size:12px">${esc(JSON.stringify(r.spec, null, 2))}</pre></details></div>`;
+}
+function wireDraft() {
+  const b = $("#pubtool"); if (!b) return;
+  b.onclick = async () => {
+    if (!confirm("Publish this tool? It goes live for the people it names.")) return;
+    b.disabled = true; b.textContent = "Publishing…";
+    const res = await engine({ action: "publish", version_id: b.dataset.v });
+    if (!res.ok) { b.disabled = false; b.textContent = "Publish this tool"; return toast(res.reason); }
+    toast(`Published v${res.result.published}`); DRAFT = null; VIEW = "tools"; render();
+  };
+}
+const fieldInput = f => {
+  const id = `f_${f.name}`;
+  const ctl = f.type === "longtext" ? `<textarea id="${id}" data-f="${esc(f.name)}"></textarea>`
+    : f.options ? `<select id="${id}" data-f="${esc(f.name)}"><option value="">Choose…</option>${f.options.map(o => `<option>${esc(o)}</option>`).join("")}</select>`
+    : `<input id="${id}" data-f="${esc(f.name)}" type="${({ number: "number", date: "date", time: "time" })[f.type] || "text"}" style="width:100%">`;
+  return `<p><label for="${id}">${esc(f.label)}</label><br>${ctl}</p>`;
+};
+const recSummary = (d, labels = {}, order = []) => Object.entries(d).filter(([k]) => !k.startsWith("_")).sort(([a], [b]) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99)).map(([k, x]) => `<span class="sub">${esc(labels[k] || k)}:</span> ${esc(x)}`).join(" · ");
+async function viewRequests() {
+  const v = $("#view"); v.innerHTML = `<p class="sub">Loading…</p>`;
+  const res = await engine({ action: "forms" });
+  if (!res.ok) { v.innerHTML = `<div class="card err">${esc(res.reason)}</div>`; return; }
+  const forms = res.result;
+  const { data: mine } = await sb.from("records").select("id, tool_id, entity, data, state, created_at, tools(slug, name)").neq("entity", "_notice").not("state", "is", null).order("created_at", { ascending: false }).limit(100);
+  if (!v.isConnected) return; // the person switched tabs while this was loading
+  v.innerHTML = `<h2>Requests</h2>${forms.length ? forms.map((f, i) => `<div class="card"><h3>${esc(f.label)}</h3><p class="sub">${esc(f.description)}</p><form data-i="${i}">${f.fields.map(fieldInput).join("")}<button class="b p">Submit</button></form></div>`).join("") : `<div class="card sub">No forms are open to you yet.</div>`}
+   <div class="card"><h3>My requests</h3>${(mine || []).length ? mine.map(r => `<div class="item"><div class="row sp"><b>${esc(r.tools?.name || "")}</b><span class="pill ${r.state === "approved" || r.state === "lent" ? "ok" : /reject/.test(r.state) ? "bad" : "warn"}">${esc(r.state)}</span></div><div>${(() => { const f = forms.find(x => x.tool === r.tools?.slug); return recSummary(r.data, Object.fromEntries((f?.fields || []).map(x => [x.name, x.label])), (f?.fields || []).map(x => x.name)); })()}</div>${(r.data._history || []).filter(h => h.note).map(h => `<div class="sub">${esc(h.action)}: ${esc(h.note)}</div>`).join("")}</div>`).join("") : `<p class="sub">Nothing submitted yet.</p>`}</div>`;
+  v.querySelectorAll("form[data-i]").forEach(form => form.onsubmit = async e => {
+    e.preventDefault(); const f = forms[+form.dataset.i], data = {};
+    form.querySelectorAll("[data-f]").forEach(el => { if (el.value !== "") data[el.dataset.f] = el.type === "number" ? Number(el.value) : el.value; });
+    const btn = e.submitter; btn.disabled = true;
+    const r = await engine({ action: "submit", tool: f.tool, input: f.input, data });
+    btn.disabled = false;
+    if (!r.ok) return toast(r.reason);
+    toast("Submitted"); viewRequests();
+  });
+}
+async function viewTools() {
+  const v = $("#view"); v.innerHTML = `<p class="sub">Loading…</p>`;
+  const { data: tools } = await sb.from("tools").select("id, slug, name, tool_versions(id, version, status, spec, published_at)").order("created_at", { ascending: false });
+  const formTools = (tools || []).filter(t => (t.tool_versions || []).some(x => (x.spec.inputs || []).some(i => i.kind === "form")));
+  const liveIds = formTools.map(t => t.id);
+  const { data: recs } = liveIds.length ? await sb.from("records").select("id, tool_id, version_id, entity, subject_member_id, data, state, created_at").in("tool_id", liveIds).not("state", "is", null).order("created_at", { ascending: false }).limit(300) : { data: [] };
+  const drafts = (tools || []).flatMap(t => (t.tool_versions || []).filter(x => x.status === "draft").map(x => ({ t, x })));
+  const { data: adm } = drafts.length ? await sb.from("tool_version_admin").select("version_id, checks").in("version_id", drafts.map(d => d.x.id)) : { data: [] };
+  if (!v.isConnected) return; // the person switched tabs while this was loading
+  v.innerHTML = `<h2>Tools</h2><p class="sub">Every tool here is a spec running on the same engine. <a href="#" id="tobuild">Build a new one</a>.</p>
+  ${formTools.map(t => { const live = t.tool_versions.find(x => x.status === "published"); const spec = live?.spec; const wf = spec?.workflow; const q = (recs || []).filter(r => r.tool_id === t.id && r.version_id === live?.id);
+    return `<div class="card"><div class="row sp"><h3>${esc(t.name)}</h3>${live ? `<span class="pill ok">v${live.version} live</span>` : `<span class="pill">not live</span>`}</div>
+     ${live ? (q.length ? q.map(r => { const acts = wf ? (wf.transitions || []).filter(x => x.from === r.state && x.role === ME.role) : []; return `<div class="item"><div class="row sp"><span>${(() => { const ef = (spec.entities[r.entity] || {}).fields || {}; return recSummary(r.data, Object.fromEntries(Object.entries(ef).map(([k, x]) => [k, x.label || k])), Object.keys(ef)); })()}</span><span class="pill ${r.state === wf?.initial ? "warn" : ""}">${esc(r.state)}</span></div><div class="sub">from ${esc(r.subject_member_id || "")} · ${fmtTs(r.created_at)}</div>${acts.length ? `<div class="row" style="margin-top:6px">${acts.map(x => `<button class="b ${x.needsNote ? "" : "p"}" data-rec="${esc(r.id)}" data-step="${esc(x.action)}" data-note="${x.needsNote ? 1 : 0}">${esc(x.label || x.action)}</button>`).join("")}</div>` : ""}</div>`; }).join("") : `<p class="sub">No submissions yet.</p>`) : ""}
+     <details><summary>What this tool does</summary>${spec ? describeSpec(spec) : ""}</details></div>`; }).join("") || `<div class="card sub">No form tools yet.</div>`}
+  ${drafts.length ? `<div class="card"><h3>Drafts waiting for review</h3>${drafts.map(({ t, x }) => `<div class="item"><div class="row sp"><b>${esc(t.name)} v${x.version}</b><button class="b" data-review="${esc(x.id)}">Review</button></div></div>`).join("")}</div>` : ""}`;
+  $("#tobuild").onclick = e => { e.preventDefault(); VIEW = "build"; render(); };
+  v.querySelectorAll("button[data-rec]").forEach(b => b.onclick = async () => {
+    let note = ""; if (b.dataset.note === "1") { note = prompt("Reason (the requester will see it):") || ""; if (!note.trim()) return; }
+    b.disabled = true;
+    const r = await engine({ action: "transition", record_id: b.dataset.rec, step: b.dataset.step, note });
+    if (!r.ok) { b.disabled = false; return toast(r.reason); }
+    toast(`${r.result.from} → ${r.result.to}`); viewTools();
+  });
+  v.querySelectorAll("button[data-review]").forEach(b => b.onclick = () => {
+    const d = drafts.find(z => z.x.id === b.dataset.review), a = (adm || []).find(z => z.version_id === d.x.id);
+    DRAFT = { description: "", result: { version: d.x.version, version_id: d.x.id, spec: d.x.spec, checks: a?.checks } }; VIEW = "build"; render();
+  });
 }
 
 sb.auth.onAuthStateChange((ev) => { if (ev === "SIGNED_OUT") renderLogin(); if (ev === "SIGNED_IN" && !ME) setTimeout(boot, 0); });

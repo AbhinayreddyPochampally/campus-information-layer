@@ -200,7 +200,7 @@ async function doSubmit(c: Caller, b: any) {
     await tx`select id from public.tool_versions where id = ${v.id} for update`; // serialise submits per tool so rules see every neighbour
     const [recent] = await tx`select count(*)::int as n from public.audit_log where actor = ${c.uid} and action = 'submit' and at > now() - interval '1 hour'`;
     if (recent.n >= 20 && !c.staff) refuse("Too many submissions in the last hour. Try again later.");
-    const nb = await tx`select id, data, state, subject_member_id from public.records where version_id = ${v.id} and entity = ${inp.entity}`;
+    const nb = await tx`select r.id, r.data || coalesce(p.data, '{}'::jsonb) as data, r.state, r.subject_member_id from public.records r left join public.record_private p on p.record_id = r.id where r.version_id = ${v.id} and r.entity = ${inp.entity}`; // rules see hidden fields too
     const rec = { id: "new", ...data, state, requester: c.member_id };
     const store = { [inp.entity]: [...nb.map((x: any) => ({ id: x.id, state: x.state, requester: x.subject_member_id, ...x.data })), rec] };
     const blocking = evalRules(spec, store, ctx, { only: "new", acks: b.acks || {} }).filter((f: any) => !f.resolved);
@@ -224,9 +224,9 @@ async function doTransition(c: Caller, b: any) {
   const ctx = await ruleContext(c, spec);
   return await sql.begin(async (tx: any) => {
     const [row] = await tx`select id, data, state, subject_member_id from public.records where id = ${seen.id} for update`; // concurrent transitions queue here
-    const nb = await tx`select id, data, state, subject_member_id from public.records where version_id = ${seen.version_id} and entity = ${seen.entity}`;
+    const nb = await tx`select r.id, r.data || coalesce(p.data, '{}'::jsonb) as data, r.state, r.subject_member_id from public.records r left join public.record_private p on p.record_id = r.id where r.version_id = ${seen.version_id} and r.entity = ${seen.entity}`; // rules see hidden fields too
     const asRec = (x: any) => ({ id: x.id, state: x.state, requester: x.subject_member_id, ...x.data });
-    const rec = asRec(row);
+    const rec = asRec(nb.find((x: any) => x.id === row.id) || row);
     const r = transition(spec, { [seen.entity]: nb.map(asRec) }, rec, b.step, { role: c.role, id: c.member_id, staff: c.staff }, b.note, ctx);
     if (!r.ok) refuse(r.error, r.findings);
     const history = [...(row.data._history || []), { at: new Date().toISOString(), by: c.role, action: b.step, from: r.from, to: r.to, note: b.note || "" }];
@@ -266,11 +266,11 @@ function draftPrompt(c: Caller, desc: string) {
  "entities":{"<Entity>":{"label":"...","fields":{"<field>":{"type":"text|longtext|number|date|time|enum|ref","label":"...","options":[...] (enum only),"table":"Rooms" (ref only)}}}},
  "rules":[ each one of:
    {"id","label","kind":"required","entity","fields":[...]}
-   {"id","label","kind":"compare","entity","field","op":">|>=|<|<=|=|!=","value":<v> OR "valueField":"<field>"}
+   {"id","label","kind":"compare","entity","field","op":">|>=|<|<=|=|!=","value":<v> OR "value":"today" (dates) OR "valueField":"<field>"}
    {"id","label","kind":"lookup","entity","field","table":"Rooms","tableKey":"room","check":{"field","op","tableField"} (optional)}
    {"id","label","kind":"unique","entity","fields":[...],"distinct":"<field>" (optional)}
    {"id","label","kind":"consistent","entity","key":"<field>","field":"<field>"}
-   {"id","label","kind":"no_overlap","entity","match":"<field>","against":{"entity":"<same entity>","where":{"state":"<state>"}}}  (entity needs date, start, end; times HH:MM, dates YYYY-MM-DD)
+   {"id","label","kind":"no_overlap","entity","match":"<field>","against":{"entity":"<same entity>","where":{"state":"<state>"}}}  (the entity MUST have fields named exactly "date", "start", "end"; times HH:MM, dates YYYY-MM-DD)
    {"id","label","kind":"no_overlap","entity","match","range":{"from":"<date field>","to":"<date field>"},"against":{"entity":"<same entity>","where":{"state":"<state>"}}} ],
  "workflow":{"entity","states":[...],"initial":"...","transitions":[{"action","label","from","to","role":"<role>","checkRules":true|false,"needsNote":true|false}]},
  "outputs":[{"id","kind":"queue|personal_list|notice","entity","audience":"requester|<role>|everyone","on":["<state>"] (notice only),"label"}],
@@ -280,7 +280,10 @@ function draftPrompt(c: Caller, desc: string) {
  "examples":{"valid":{<one realistic record that passes every rule>}}}
 Roles in this organisation: ${c.org.roles.join(", ")}. Staff roles (${c.org.staff_roles.join(", ")}) see everything. "own" = records that person submitted. Every entity needs an access entry; deny by default. Every role that acts in the workflow must be able to view.
 Reference tables: Rooms(room, capacity) with rooms ${TABLES.Rooms.rows.map(r => r.room).join(", ")}.
-Design rules: use only the parts above. Anything the description asks for that these parts cannot do goes in "unsupported", honestly. Least access. Put every check asked for into "rules". Any approval step has "checkRules": true. A rejection needs a note. Include a notice output to the requester for decisions. Keep it small.
+Today is ${new Date().toISOString().slice(0, 10)}. "Not in the past" is {"kind":"compare","op":">=","value":"today"}; never a fixed date. examples.valid must use dates after today.
+Notices are shown inside this app only. SMS, email, WhatsApp, push, payments, file uploads and calendar invites do not exist: if asked for, put each in "unsupported" and never relabel another part as one.
+Never hide a field from the role that fills it in. Use "hide" only to keep a field from other viewers.
+Design rules: use only the parts above. Add only the rules the description asks for (plus "required" for fields it needs); never invent extra restrictions. Anything the description asks for that these parts cannot do goes in "unsupported", honestly. Least access. Put every check asked for into "rules". Any approval step has "checkRules": true. A rejection needs a note. Include a notice output to the requester for decisions. Keep it small.
 Reply with only the JSON object.
 Administrator's description:
 """${desc}"""`;
@@ -297,8 +300,15 @@ async function doDraftTool(c: Caller, b: any) {
   };
   const msgs: any[] = [{ role: "user", content: draftPrompt(c, desc.slice(0, 4000)) }];
   let spec = await ask(msgs), errs = validateSpec(spec, env(c));
-  if (errs.length) { msgs.push({ role: "assistant", content: JSON.stringify(spec) }, { role: "user", content: `Fix these problems and reply with the full corrected JSON only:\n- ${errs.join("\n- ")}` }); spec = await ask(msgs); errs = validateSpec(spec, env(c)); }
+  for (let round = 0; round < 2 && errs.length; round++) { msgs.push({ role: "assistant", content: JSON.stringify(spec) }, { role: "user", content: `Fix these problems and reply with the full corrected JSON only:\n- ${errs.join("\n- ")}` }); spec = await ask(msgs); errs = validateSpec(spec, env(c)); }
   if (errs.length) refuse("The drafted spec still has problems.", errs);
+  const today = new Date().toISOString().slice(0, 10);
+  let failing = runGeneratedTests(spec, { tables: TABLES, tools: {}, today }).filter((t: any) => !t.pass);
+  if (failing.length) {
+    msgs.push({ role: "assistant", content: JSON.stringify(spec) }, { role: "user", content: `These tests generated from your rules fail (each rule must catch its case, and examples.valid must pass every rule):\n- ${failing.map((t: any) => `${t.name} (got: ${t.got})`).join("\n- ")}\nReply with the full corrected JSON only.` });
+    const again = await ask(msgs);
+    if (!validateSpec(again, env(c)).length && runGeneratedTests(again, { tables: TABLES, tools: {}, today }).every((t: any) => t.pass)) spec = again;
+  }
   const slug = spec.id.replace(/_/g, "-");
   if (!SLUG.test(slug)) refuse("The drafted tool id is not usable.");
   return await sql.begin(async (tx: any) => {
@@ -316,7 +326,25 @@ async function doDraftTool(c: Caller, b: any) {
   });
 }
 
-const ACTIONS: Record<string, (c: Caller, b: any) => Promise<unknown>> = { import: doImport, publish: doPublish, submit: doSubmit, transition: doTransition, set_role: doSetRole, draft_tool: doDraftTool };
+// Read-only: the live forms this caller may fill in. Tool specs are staff-only in the database,
+// so students learn a form's fields here, never the rest of the spec.
+async function doForms(c: Caller, _b: any) {
+  const { data: tools } = await c.db.from("tools").select("id, slug, name"); // RLS: only tools this person may see
+  const out: any[] = [];
+  for (const t of tools || []) {
+    const v = await liveVersion(t.id); if (!v) continue;
+    const spec = v.spec;
+    for (const inp of spec.inputs || []) {
+      if (inp.kind !== "form" || (inp.role !== c.role && !c.staff)) continue;
+      const fields = (spec.entities[inp.entity] || {}).fields || {};
+      out.push({ tool: t.slug, name: spec.name, description: spec.description || "", input: inp.id, label: inp.label || spec.name, entity: inp.entity,
+        fields: inp.fields.map((f: string) => { const fd = fields[f] || {}; return { name: f, label: fd.label || f, type: fd.type, options: fd.type === "enum" ? fd.options : fd.type === "ref" ? ((TABLES[fd.table] || {}).rows || []).map(r => String(Object.values(r)[0])) : undefined }; }) });
+    }
+  }
+  return out;
+}
+
+const ACTIONS: Record<string, (c: Caller, b: any) => Promise<unknown>> = { forms: doForms, import: doImport, publish: doPublish, submit: doSubmit, transition: doTransition, set_role: doSetRole, draft_tool: doDraftTool };
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });

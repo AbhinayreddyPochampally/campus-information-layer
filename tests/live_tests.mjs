@@ -20,7 +20,8 @@ const su = await client().auth.signUp({ email: "someone.cil.test@gmail.com", pas
 ok("Unconfigured email domain cannot sign up", !!su.error, JSON.stringify(su.data?.user?.id));
 const { data: profA } = await U.A.from("profiles").select("member_id, email");
 ok("Member ID read from email by the org pattern; a student sees only their own profile", profA.length === 1 && profA[0].member_id === "259999001", JSON.stringify(profA));
-ok("Signed-out visitor reads nothing", (await anon.from("records").select("id")).data?.length === 0 && (await anon.from("organizations").select("id")).data?.length === 0);
+{ const a1 = await anon.from("records").select("id"), a2 = await anon.from("organizations").select("id");
+  ok("Signed-out visitor reads nothing (denied outright)", !(a1.data || []).length && !(a2.data || []).length, JSON.stringify([a1, a2]).slice(0, 200)); }
 
 // ---------------- seating: import -> checks -> publish ----------------
 const sheets = {
@@ -63,8 +64,10 @@ ok("Invigilator sees room rosters + notice, no student seats", seenI.filter(x =>
 ok("Other organisation sees nothing", (await rows(U.X, q => q.select("id"))).length === 0 && (await U.X.from("tools").select("id")).data.length === 0 && (await U.X.from("organizations").select("slug")).data.every(o => o.slug === "cil-test-other"));
 ok("Student cannot read hidden fields, audit or refusals", (await U.A.from("record_private").select("*")).data.length === 0 && (await U.A.from("audit_log").select("id")).data.length === 0 && (await U.A.from("refusals").select("id")).data.length === 0);
 ok("Admin sees everything in the org, including audit", (await rows(U.admin, q => q.select("id"))).length >= 6 && (await U.admin.from("audit_log").select("id")).data.length >= 3);
-const { data: tvA } = await U.A.from("tool_versions").select("status, checks");
-ok("Student sees only published versions", tvA.every(v => v.status === "published"));
+const tvA = await U.A.from("tool_versions").select("id, status");
+ok("Student reads no tool versions at all (specs are staff-only)", (tvA.data || []).length === 0, JSON.stringify(tvA).slice(0, 200));
+const tvC = await U.admin.from("tool_versions").select("checks");
+ok("Nobody reads check details from tool_versions (column not granted)", !!tvC.error, JSON.stringify(tvC).slice(0, 200));
 
 // ---------------- direct writes from a signed-in browser ----------------
 const anyRec = seenA.length ? (await rows(U.A, q => q.select("id, org_id, tool_id, version_id").limit(1)))[0] : {};
@@ -94,6 +97,7 @@ r = await call(U.admin, { action: "set_role", email: E.B, role: "rep" });
 ok("Engine: admin makes B a class rep", r.ok, r.reason);
 
 // ---------------- form tool: submit -> workflow ----------------
+await call(U.admin, { action: "set_role", email: E.A, role: "student" }); // other suites may have changed it
 const { data: bv } = await U.admin.from("tool_versions").select("id, tools!inner(slug)").eq("tools.slug", BOOK).eq("status", "draft");
 r = await call(U.admin, { action: "publish", version_id: bv[0].id });
 ok("Engine: room-booking tool publishes (generated tests pass)", r.ok, JSON.stringify(r));
@@ -126,8 +130,8 @@ if (fin[0].state === "approved") {
   r = await call(U.admin, { action: "transition", record_id: reqId, step: "approve" });
   ok("Engine: a rejected request cannot then be approved", !r.ok, r.reason);
 }
-r = await call(U.admin, { action: "draft_tool", description: "Students request a locker for the term; the office approves." });
-ok("Engine: draft_tool refuses cleanly until the AI key is set", !r.ok && /AI key/.test(r.reason), r.reason);
+r = await call(U.A, { action: "draft_tool", description: "Students request a locker for the term; the office approves." });
+ok("Engine: a student cannot draft tools", !r.ok && /staff/.test(r.reason), r.reason);
 r = await call(U.admin, { action: "set_role", email: E.B, role: "student" });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

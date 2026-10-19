@@ -62,14 +62,16 @@ export function validateSpec(spec, env) {
     const need = f => { if (!hasField(r.entity, f)) e(`Rule ${r.id}: field "${f}" is not on ${r.entity}.`); };
     if (r.kind === "required" || r.kind === "unique") (r.fields || []).forEach(need), (!(r.fields || []).length && e(`Rule ${r.id}: list the fields.`));
     if (r.kind === "unique" && r.distinct) need(r.distinct);
+    if (r.kind === "compare" && r.value !== undefined && r.value !== "today" && /^\d{4}-\d{2}-\d{2}$/.test(String(r.value))) e(`Rule ${r.id}: compare a date with "today" (\"value\":\"today\"), not a fixed date like ${r.value}, so the rule keeps working.`);
     if (r.kind === "compare") { need(r.field); if (r.valueField) need(r.valueField); if (![">", ">=", "<", "<=", "=", "!="].includes(r.op)) e(`Rule ${r.id}: op "${r.op}" is not supported.`); if (r.valueField === undefined && r.value === undefined) e(`Rule ${r.id}: give value or valueField.`); }
     if (r.kind === "consistent") { need(r.key); need(r.field); }
     if (r.kind === "lookup") { need(r.field); const t = env.tables[r.table]; if (!t) e(`Rule ${r.id}: table "${r.table}" does not exist.`); else { if (!t.fields.includes(r.tableKey)) e(`Rule ${r.id}: table ${r.table} has no column "${r.tableKey}".`); if (r.check) { need(r.check.field); if (!t.fields.includes(r.check.tableField)) e(`Rule ${r.id}: table ${r.table} has no column "${r.check.tableField}".`); } } }
     if (r.kind === "no_overlap") {
       need(r.match);
       if (r.range) { need(r.range.from); need(r.range.to); if (r.against && r.against.tool) e(`Rule ${r.id}: date ranges can only be checked against the same entity.`); }
-      else { ["start", "end"].forEach(need); if (!hasField(r.entity, "date") && !hasField(r.entity, "dayIdx")) e(`Rule ${r.id}: ${r.entity} needs a date field, or use "range".`); }
+      else { const miss = ["date", "start", "end"].filter(f => !hasField(r.entity, f) && !(f === "date" && hasField(r.entity, "dayIdx"))); if (miss.length) e(`Rule ${r.id}: a time clash check needs ${r.entity} fields named exactly "date", "start" and "end" (rename ${miss.map(f => `the ${f} field to "${f}"`).join(", ")}; update inputs, rules and examples to match).`); }
       const a = r.against || {};
+      Object.entries(a.where || {}).forEach(([k, v]) => { if (k !== "state") e(`Rule ${r.id}: against.where can only filter by "state" (the date and time are compared automatically); remove "${k}".`); else if (spec.workflow && !(spec.workflow.states || []).includes(v)) e(`Rule ${r.id}: against.where.state "${v}" is not a workflow state.`); else if (spec.workflow && v === spec.workflow.initial) e(`Rule ${r.id}: checking clashes only against "${v}" (the state every new request starts in) leaves ${spec.workflow.states.filter(x => x !== v).join("/")} ones unprotected. Use the state that holds the slot (for example "approved").`); });
       if (a.tool) { if (!(env.tools[a.tool] && env.tools[a.tool].entities.includes(a.entity))) e(`Rule ${r.id}: tool "${a.tool}" has no live entity "${a.entity}".`); }
       else if (!ents[a.entity]) e(`Rule ${r.id}: entity "${a.entity}" does not exist.`);
     }
@@ -91,13 +93,18 @@ export function validateSpec(spec, env) {
       if (!SCOPES.includes(sc)) e(`Access ${en}: scope "${sc}" cannot be enforced by the database. Use one of ${SCOPES.join(", ")}.`);
       if (role === "everyone" && sc === "own") e(`Access ${en}: "everyone" can only be "all" or "none".`);
     });
-    Object.entries(a.hide || {}).forEach(([role, fs]) => (fs || []).forEach(f => { if (f !== "requester" && !hasField(en, f)) e(`Access ${en}: cannot hide unknown field "${f}" from ${role}.`); }));
+    Object.entries(a.hide || {}).forEach(([role, fs]) => (fs || []).forEach(f => {
+      if (f !== "requester" && !hasField(en, f)) e(`Access ${en}: cannot hide unknown field "${f}" from ${role}.`);
+      if ((spec.inputs || []).some(i => i.kind === "form" && i.entity === en && i.role === role && (i.fields || []).includes(f))) e(`Access ${en}: ${role}s fill in "${f}", so it cannot be hidden from them. Remove it from hide.${role}.`);
+    }));
   });
   Object.keys(ents).forEach(en => { if (!(spec.access || {})[en]) e(`Access: say who may see ${en} records. Without it only staff see them (deny by default).`); });
   if (wf) (wf.transitions || []).forEach(t => { if (accessFor(spec, wf.entity, t.role) === "none") e(`Workflow action "${t.action}": ${t.role} may act but cannot see ${wf.entity} records. Give ${t.role} view access in "access".`); });
   (spec.outputs || []).forEach(o => {
     if (!OUTPUT_KINDS.includes(o.kind)) e(`Output ${o.id}: unknown kind "${o.kind}".`);
     if (o.audience && !AUDIENCES.includes(o.audience)) e(`Output ${o.id}: audience "${o.audience}" is not one of ${AUDIENCES.join(", ")}.`);
+    if (o.on && o.kind !== "notice") e(`Output ${o.id}: only a notice can fire "on" a state change.`);
+    if (/(^|[^a-z])(sms|text message|e-?mail|whatsapp)([^a-z]|$)/i.test(`${o.id} ${o.label || ""}`)) e(`Output ${o.id}: "${o.label || o.id}" is not available (notices are in-app only). Remove this output and list it in "unsupported".`);
     if (o.on && wf) o.on.forEach(st => { if (!wf.states.includes(st)) e(`Output ${o.id}: state "${st}" is not in the workflow.`); });
   });
   if ((spec.inputs || []).some(i => i.kind === "form") && !(spec.examples && spec.examples.valid)) e("Add examples.valid: one realistic record that should pass every rule (used to generate tests).");
@@ -133,7 +140,7 @@ export function evalRules(spec, records, ctx, opts = {}) {
     const all = records[r.entity] || [];
     const push = (key, ids, message) => out.push({ rule: r.id, ruleLabel: r.label || r.id, key: `${r.id}|${key}`, ids, message, ackable: !!r.ackable, resolved: !!acks[`${r.id}|${key}`] });
     if (r.kind === "required") recs.forEach(x => { const miss = r.fields.filter(f => isBlank(x[f])); if (miss.length) push(x.id, [x.id], `Missing: ${miss.map(f => label(spec, r.entity, f)).join(", ")}.`); });
-    if (r.kind === "compare") recs.forEach(x => { const a = x[r.field], b = r.valueField ? x[r.valueField] : r.value; if (isBlank(a) || isBlank(b)) return; if (!cmpVals(a, r.op, b)) push(x.id, [x.id], r.message ? fill(r.message, x) : `${label(spec, r.entity, r.field)} must be ${r.op} ${r.valueField ? label(spec, r.entity, r.valueField) : b} (is ${a}).`); });
+    if (r.kind === "compare") recs.forEach(x => { const a = x[r.field], b = r.valueField ? x[r.valueField] : r.value === "today" ? ctx.today : r.value; if (isBlank(a) || isBlank(b)) return; if (!cmpVals(a, r.op, b)) push(x.id, [x.id], r.message ? fill(r.message, x) : `${label(spec, r.entity, r.field)} must be ${r.op} ${r.valueField ? label(spec, r.entity, r.valueField) : b} (is ${a}).`); });
     if (r.kind === "lookup") recs.forEach(x => {
       if (isBlank(x[r.field])) return;
       const row = ((ctx.tables[r.table] || {}).rows || []).find(t => String(t[r.tableKey]) === String(x[r.field]));
@@ -225,7 +232,7 @@ function generateTests(spec, ctx) {
     if (r.kind === "required") { x[r.fields[0]] = ""; note = `${label(spec, ent, r.fields[0])} left empty`; }
     else if (r.kind === "compare") {
       const type = ((spec.entities[ent].fields || {})[r.field] || {}).type;
-      const ref = r.valueField ? x[r.valueField] : r.value;
+      const ref = r.valueField ? x[r.valueField] : r.value === "today" ? ctx.today : r.value;
       const shift = r.op === "<=" ? 1 : r.op === ">=" ? -1 : r.op === "=" ? 1 : 0;
       x[r.field] = shiftVal(ref, type, shift);
       note = `${label(spec, ent, r.field)} set to ${x[r.field]}`;
