@@ -18,12 +18,16 @@ Read this first. The docs in `live-build/` in this Project are the source of tru
   - Admin view: upload .xlsx (parsed in the browser) → confirm the date and time per sheet (remembered from the last import) → Check → Publish. Plus Roles and Activity (audit + refusals).
   - Tested in Chromium as student, invigilator and admin, including a full upload → publish.
 
-## Not done / needs Abhinay
-1. **Hosting.** The Vercel connector can deploy but cannot create a project. Create an empty project once (e.g. `campus-information-layer`, no framework). Or drag `web_index.html` (renamed to `index.html`) into vercel.com/new. After that, Claude can redeploy into it.
-2. **OTP email template.** Supabase → Auth → Email Templates → "Magic Link": include `{{ .Token }}` so the email carries the 6-digit code the page asks for. The built-in mailer allows only a few emails per hour. Set up custom SMTP before a test group of more than a handful.
-3. **Load real seating.** Sign in as admin on the hosted page and upload the Exam Cell workbooks. Confirm GOC = 2026-10-10 10:00–12:30 (from the Exam Cell email) and publish. The mid-term sheet dates are read from sheet names. Ask the Exam Cell before sharing beyond a test group.
-4. **OPENAI_API_KEY** as an edge-function secret (only `draft_tool` uses it; until then it refuses cleanly).
-5. **Test-data cleanup.** Deletes need approval in the Supabase connector. Run `cleanup.sql` (removes tools `cil-test-*`, the `cil-test-other` org, 259999xxx test accounts, and their memberships, audit and refusal rows).
+## Hosting (done 19 Oct)
+- Live at **https://campus-information-layer.vercel.app**. GitHub repo `AbhinayreddyPochampally/campus-information-layer` is linked to Vercel, so every push to `main` deploys. The Claude GitHub App has push access; the Vercel connector is read-only.
+- Supabase Site URL = the Vercel URL.
+- Sign-in uses the **emailed link** (Supabase's default template). Email templates can't be edited without custom SMTP. The code box stays as a fallback for when SMTP + `{{ .Token }}` templates are set up.
+
+## Still needs Abhinay
+1. **Custom SMTP** (e.g. Resend) before a test group. The built-in mailer sends only a few emails per hour.
+2. **Load real seating.** Sign in as admin on the live site, upload the Exam Cell workbooks, confirm GOC = 2026-10-10 10:00–12:30, publish. Ask the Exam Cell before sharing beyond a test group.
+3. **OPENAI_API_KEY** as an edge-function secret (for `draft_tool` only).
+4. **Test-data cleanup.** Run `tests/cleanup.sql` (deletes need approval in the Supabase connector).
 
 ## Constraints (unchanged)
 - Never ask for secrets in chat.
