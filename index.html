@@ -84,7 +84,7 @@ function renderLogin(step = "email", email = "", msg = "") {
   ${step === "email" ? `<p class="sub">We'll email you a sign-in link. Only campus emails can sign in.</p>
     <form id="f1"><label for="em">Campus email</label><input id="em" type="email" autocomplete="email" required placeholder="name.rollnumber@iimmumbai.ac.in" value="${esc(email)}">
     <button class="b p" type="submit">Email me a sign-in link</button></form>`
-  : `<p>Email sent to <b>${esc(email)}</b>. <b>Open it on this device and tap the sign-in link</b>; you'll land back here signed in.</p><p class="sub">It can take a minute; check spam too. If your email shows a code instead, enter it below.</p>
+  : `<p>Email sent to <b>${esc(email)}</b>. <b>Enter the code from the email below.</b></p><p class="sub">It can take a minute; check spam too. If the email only has a link, tap it on this device instead.</p>
     <form id="f2"><label for="code">Code (only if your email has one)</label><input id="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6,10}" required>
     <div class="row"><button class="b p" type="submit">Sign in</button><button class="b" type="button" id="back">Use another email</button></div></form>`}
   <p class="err" id="lmsg">${esc(msg)}</p></div>`;
@@ -430,7 +430,10 @@ async function viewTools() {
 }
 
 sb.auth.onAuthStateChange((ev) => { if (ev === "SIGNED_OUT") renderLogin(); if (ev === "SIGNED_IN" && !ME) setTimeout(boot, 0); });
-boot();
+// A link that comes back with an error (usually: the campus mail scanner opened it first) must say so, not silently reload.
+const LINK_ERR = new URLSearchParams(location.hash.slice(1)).get("error_description") || new URLSearchParams(location.search).get("error_description");
+if (LINK_ERR) { history.replaceState(null, "", location.pathname); renderLogin("email", "", /expired|invalid/i.test(LINK_ERR) ? "That sign-in link was already used or expired. Campus email security often opens links before you do. Request a new one and use the code in the email." : LINK_ERR); }
+else boot();
 </script>
 </body>
 </html>
