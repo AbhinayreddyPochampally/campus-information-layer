@@ -22,6 +22,28 @@ const TABLES: Record<string, { fields: string[]; rows: Record<string, unknown>[]
 };
 const ADAPTERS: Record<string, { spec: any; run: (body: any) => any }> = { seating: { spec: SEATING_SPEC, run: (b) => runSeating(b.sheets || {}, b.cfg || {}) } };
 
+const MAX_BODY = 6_000_000;           // bytes; a full seating workbook is ~100 KB
+const SLUG = /^[a-z][a-z0-9-]{1,40}$/;
+const EMAIL = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/;
+const own = (o: any, k: unknown) => typeof k === "string" && Object.prototype.hasOwnProperty.call(o, k);
+// A field value must match its declared type; returns an error message or "".
+function badField(fd: any, v: any): string {
+  if (v === undefined || v === null || v === "") return "";
+  const s = String(v);
+  switch (fd.type) {
+    case "text": return s.length > 300 ? "is longer than 300 characters" : "";
+    case "longtext": return s.length > 4000 ? "is longer than 4000 characters" : "";
+    case "number": return Number.isFinite(Number(v)) && s.length <= 15 ? "" : "is not a number";
+    case "date": return /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(Date.parse(s)) ? "" : "is not a YYYY-MM-DD date";
+    case "time": return /^([01]\d|2[0-3]):[0-5]\d$/.test(s) ? "" : "is not an HH:MM time";
+    case "enum": return (fd.options || []).includes(s) ? "" : `must be one of ${(fd.options || []).join(", ")}`;
+    case "ref": return ((TABLES[fd.table] || {}).rows || []).some(r => Object.values(r).map(String).includes(s)) ? "" : `is not in ${fd.table}`;
+    default: return "has an unknown type";
+  }
+}
+// Records shown to a group must never carry someone's member ID.
+const MEMBER_ID = /(^|[^0-9])[0-9]{9}([^0-9]|$)/;
+
 type Caller = { uid: string; email: string; org: any; member_id: string | null; role: string; staff: boolean; db: any };
 
 // ---------- steps 1-2: identity and organisation, read with the caller's own token ----------
@@ -81,8 +103,12 @@ async function ruleContext(c: Caller, spec: any) {
 // ---------- actions ----------
 async function doImport(c: Caller, b: any) {
   if (!c.staff) refuse("Only staff can import files.");
-  const ad = ADAPTERS[b.adapter]; if (!ad) refuse(`Unknown source adapter "${b.adapter}".`);
-  const slug = String(b.tool || "").trim(); if (!/^[a-z][a-z0-9-]{1,40}$/.test(slug)) refuse("Give the tool a slug like exam-seating.");
+  const ad = own(ADAPTERS, b.adapter) ? ADAPTERS[b.adapter] : null; if (!ad) refuse(`Unknown source adapter "${b.adapter}".`);
+  const slug = String(b.tool || "").trim(); if (!SLUG.test(slug)) refuse("Give the tool a slug like exam-seating.");
+  if (!b.sheets || typeof b.sheets !== "object" || Array.isArray(b.sheets)) refuse("The file has no readable sheets.");
+  const sheetList = Object.entries(b.sheets);
+  if (!sheetList.length || sheetList.length > 60) refuse("Upload between 1 and 60 sheets.");
+  if (sheetList.some(([, rows]: any) => !Array.isArray(rows) || rows.length > 5000 || rows.some((r: any) => !Array.isArray(r) || r.length > 60))) refuse("A sheet is not a grid of rows, or is too large (5,000 rows × 60 columns at most).");
   const res = ad.run(b);
   const spec = ad.spec;
   const errs = validateSpec(spec, env(c)); if (errs.length) refuse("The tool spec is invalid.", errs);
@@ -91,15 +117,22 @@ async function doImport(c: Caller, b: any) {
   const byRoom: Record<string, any[]> = {};
   res.seats.forEach((s: any) => (byRoom[`${s.sheet}|${s.room}`] = byRoom[`${s.sheet}|${s.room}`] || []).push(s));
   const rosters = Object.values(byRoom).map(g => ({ data: { exam: g[0].exam, date: g[0].date, start: g[0].start, end: g[0].end, room: g[0].room, courses: g[0].courses.join(" / "), students: g.length, sheet: g[0].sheet, seats: g.map(s => `R${s.row}C${s.col} ${s.roll}`).join(", ") }, subject: null, src: g[0].sheet }));
+  if (b.notice && MEMBER_ID.test(`${b.notice.title || ""} ${b.notice.body || ""}`)) res.issues.push({ key: "notice|member-id", type: "privacy", message: "The notice to everyone contains a roll number. Remove it: notices are shown to every student." }), res.flags.push(res.issues.at(-1));
   const notice = b.notice && String(b.notice.body || "").trim() ? [{ data: { title: String(b.notice.title || "Exam Cell notice").slice(0, 200), body: String(b.notice.body).slice(0, 4000) }, subject: null }] : [];
-  const checks = { ok: res.ok, issues: res.issues.length, flags: res.flags, summary: { seats: res.seats.length, students: res.students, rooms: res.rooms, rosters: rosters.length, notices: notice.length } };
+  const checks = { ok: res.issues.length === 0 && res.seats.length > 0, issues: res.issues.length, flags: res.flags, summary: { seats: res.seats.length, students: res.students, rooms: res.rooms, rosters: rosters.length, notices: notice.length } };
   const source = { adapter: b.adapter, files: (b.files || []).slice(0, 20), sheets: Object.keys(b.sheets || {}), cfg: b.cfg || {}, notice: b.notice || null, imported_at: new Date().toISOString() };
   const out = await sql.begin(async (tx: any) => {
     let [tool] = await tx`select id, kind from public.tools where org_id = ${c.org.id} and slug = ${slug} for update`;
+    if (tool) { // a slug belongs to one kind of tool: never import a file onto a different tool
+      const [last] = await tx`select spec from public.tool_versions where tool_id = ${tool.id} order by version desc limit 1`;
+      const adapterOf = (sp: any) => ((sp && sp.inputs) || []).find((i: any) => i.kind === "file")?.adapter;
+      if (last && adapterOf(last.spec) !== b.adapter) refuse(`"${slug}" is a different kind of tool; pick another name.`);
+    }
     if (!tool) [tool] = await tx`insert into public.tools (org_id, slug, name, kind, created_by) values (${c.org.id}, ${slug}, ${spec.name}, 'information', ${c.uid}) returning id, kind`;
     await tx`delete from public.tool_versions where tool_id = ${tool.id} and status = 'draft'`; // one pending import at a time
     const [{ n }] = await tx`select coalesce(max(version), 0) + 1 as n from public.tool_versions where tool_id = ${tool.id}`;
-    const [v] = await tx`insert into public.tool_versions (tool_id, version, spec, status, checks, source) values (${tool.id}, ${n}, ${tx.json(spec)}, 'draft', ${tx.json(checks)}, ${tx.json(source)}) returning id, version`;
+    const [v] = await tx`insert into public.tool_versions (tool_id, version, spec, status) values (${tool.id}, ${n}, ${tx.json(spec)}, 'draft') returning id, version`;
+    await tx`insert into public.tool_version_admin (version_id, org_id, checks, source) values (${v.id}, ${c.org.id}, ${tx.json(checks)}, ${tx.json(source)})`; // staff-only
     await insertRows(tx, rowsFor(spec, "Seat", seats, c, tool.id, v.id), c.org.id);
     await insertRows(tx, rowsFor(spec, "Roster", rosters, c, tool.id, v.id), c.org.id);
     await insertRows(tx, rowsFor(spec, "Notice", notice, c, tool.id, v.id), c.org.id);
@@ -111,8 +144,10 @@ async function doImport(c: Caller, b: any) {
 
 async function doPublish(c: Caller, b: any) {
   if (c.role !== "admin") refuse("Only an admin can publish.");
-  const { data: v } = await c.db.from("tool_versions").select("id, tool_id, version, spec, status, checks").eq("id", b.version_id).maybeSingle();
-  if (!v) refuse("Version not found in your organisation.");
+  if (typeof b.version_id !== "string") refuse("Say which version to publish.");
+  const { data: seen } = await c.db.from("tool_versions").select("id").eq("id", b.version_id).maybeSingle(); // visibility, with the caller's own token
+  if (!seen) refuse("Version not found in your organisation.");
+  const [v] = await sql`select v.id, v.tool_id, v.version, v.spec, v.status, a.checks from public.tool_versions v left join public.tool_version_admin a on a.version_id = v.id where v.id = ${seen.id}`;
   if (v.status !== "draft") refuse(`This version is ${v.status}, not a draft.`);
   const ctx = await ruleContext(c, v.spec);
   const errs = validateSpec(v.spec, env(c, Object.fromEntries(Object.entries(ctx.tools).map(([k, e]) => [k, { entities: Object.keys(e as any) }]))));
@@ -121,13 +156,18 @@ async function doPublish(c: Caller, b: any) {
   const failed = runGeneratedTests(v.spec, ctx).filter((t: any) => !t.pass);
   if (failed.length) refuse("Generated tests fail.", failed);
   return await sql.begin(async (tx: any) => {
-    await tx`select id from public.tools where id = ${v.tool_id} for update`;
+    await tx`select id from public.tools where id = ${v.tool_id} for update`; // concurrent publishes of one tool queue here
+    const [still] = await tx`select status from public.tool_versions where id = ${v.id}`;
+    if (still.status !== "draft") refuse(`This version is already ${still.status}.`);
+    const [leak] = await tx`select count(*)::int as n from public.records where version_id = ${v.id} and ('everyone' = any(audience) or 'student' = any(audience)) and data::text ~ '(^|[^0-9])[0-9]{9}([^0-9]|$)'`;
+    if (leak.n) refuse(`${leak.n} record(s) shown to a whole group contain a roll number. Remove them before publishing.`);
     const [cnt] = await tx`select count(*)::int as total, count(*) filter (where subject_member_id is null and cardinality(audience) = 0)::int as unplaced from public.records where version_id = ${v.id}`;
     const fromFile = (v.spec.inputs || []).some((i: any) => i.kind === "file");
     if (fromFile && cnt.total === 0) refuse("This import has no records."); // form tools start empty and fill through submit
     if (cnt.unplaced) refuse(`${cnt.unplaced} record(s) have neither a subject nor an audience, so nobody but staff would see them.`);
-    const [prev] = await tx`update public.tool_versions set status = 'retired' where tool_id = ${v.tool_id} and status = 'published' returning id, version`;
-    await tx`update public.tool_versions set status = 'published', published_at = now(), published_by = ${c.uid} where id = ${v.id} and status = 'draft'`;
+    const [prev] = await tx`update public.tool_versions set status = 'retired' where tool_id = ${v.tool_id} and status = 'published' and id <> ${v.id} returning id, version`;
+    const done = await tx`update public.tool_versions set status = 'published', published_at = now(), published_by = ${c.uid} where id = ${v.id} and status = 'draft' returning id`;
+    if (!done.length) refuse("This version changed while publishing; nothing was changed.");
     await audit(tx, c, "publish", v.tool_id, { version: v.version, version_id: v.id, retired: prev || null, records: cnt.total });
     return { published: v.version, version_id: v.id, retired: prev?.version ?? null, records: cnt.total };
   });
@@ -142,8 +182,13 @@ async function doSubmit(c: Caller, b: any) {
   if (!inp) refuse("That form does not exist.");
   if (inp.role !== c.role && !c.staff) refuse(`This form is for ${inp.role}s.`);
   if (!c.member_id && !c.staff) refuse("Your account has no member ID.");
-  const data: any = {};
-  inp.fields.forEach((f: string) => { if (b.data && b.data[f] !== undefined) data[f] = b.data[f]; }); // form fields only; subject is never taken from the request
+  if (b.data !== undefined && (typeof b.data !== "object" || b.data === null || Array.isArray(b.data))) refuse("The form data is not an object.");
+  const data: any = {}, fields = (spec.entities[inp.entity] || {}).fields || {};
+  inp.fields.forEach((f: string) => { if (b.data && own(b.data, f)) data[f] = b.data[f]; }); // form fields only; subject is never taken from the request
+  const bad = Object.entries(data).map(([f, val]) => [f, badField(fields[f] || {}, val)]).filter(([, e]) => e);
+  if (bad.length) refuse(bad.map(([f, e]) => `${(fields[f] || {}).label || f} ${e}`).join("; ") + ".");
+  const [recent] = await sql`select count(*)::int as n from public.audit_log where actor = ${c.uid} and action = 'submit' and at > now() - interval '1 hour'`;
+  if (recent.n >= 20 && !c.staff) refuse("Too many submissions in the last hour. Try again later.");
   const state = spec.workflow && spec.workflow.entity === inp.entity ? spec.workflow.initial : null;
   const ctx = await ruleContext(c, spec);
   return await sql.begin(async (tx: any) => {
@@ -161,6 +206,8 @@ async function doSubmit(c: Caller, b: any) {
 }
 
 async function doTransition(c: Caller, b: any) {
+  if (typeof b.record_id !== "string" || typeof b.step !== "string") refuse("Say which record and which step.");
+  if (b.note !== undefined && String(b.note).length > 1000) refuse("The note is longer than 1000 characters.");
   const { data: seen } = await c.db.from("records").select("id, tool_id, version_id, entity, state").eq("id", b.record_id).maybeSingle();
   if (!seen) refuse("Record not found.");
   const [v] = await sql`select spec, status from public.tool_versions where id = ${seen.version_id}`;
@@ -190,10 +237,11 @@ async function doTransition(c: Caller, b: any) {
 async function doSetRole(c: Caller, b: any) {
   if (c.role !== "admin") refuse("Only an admin can change roles.");
   const email = String(b.email || "").trim().toLowerCase();
+  if (!EMAIL.test(email)) refuse("That is not a valid email address.");
   const domain = email.split("@")[1] || "";
   const [d] = await sql`select org_id from public.org_domains where domain = ${domain}`;
   if (!d || d.org_id !== c.org.id) refuse("That email is not in your organisation's domains.");
-  if (!c.org.roles.includes(b.role)) refuse(`"${b.role}" is not one of this organisation's roles: ${c.org.roles.join(", ")}.`);
+  if (typeof b.role !== "string" || !c.org.roles.includes(b.role)) refuse(`"${b.role}" is not one of this organisation's roles: ${c.org.roles.join(", ")}.`);
   if (email === c.email && b.role !== "admin") refuse("You cannot remove your own admin role.");
   return await sql.begin(async (tx: any) => {
     const [before] = await tx`select role from public.memberships where org_id = ${c.org.id} and email = ${email}`;
@@ -245,13 +293,17 @@ async function doDraftTool(c: Caller, b: any) {
   if (errs.length) { msgs.push({ role: "assistant", content: JSON.stringify(spec) }, { role: "user", content: `Fix these problems and reply with the full corrected JSON only:\n- ${errs.join("\n- ")}` }); spec = await ask(msgs); errs = validateSpec(spec, env(c)); }
   if (errs.length) refuse("The drafted spec still has problems.", errs);
   const slug = spec.id.replace(/_/g, "-");
+  if (!SLUG.test(slug)) refuse("The drafted tool id is not usable.");
   return await sql.begin(async (tx: any) => {
     let [tool] = await tx`select id from public.tools where org_id = ${c.org.id} and slug = ${slug} for update`;
+    if (tool) { const [last] = await tx`select spec from public.tool_versions where tool_id = ${tool.id} order by version desc limit 1`;
+      if (last && ((last.spec.inputs || []).some((i: any) => i.kind === "file") || last.spec.id !== spec.id)) refuse(`A tool called "${slug}" already exists. Describe the new tool with a different name.`); }
     if (!tool) [tool] = await tx`insert into public.tools (org_id, slug, name, kind, created_by) values (${c.org.id}, ${slug}, ${spec.name}, 'information', ${c.uid}) returning id`;
     const [{ n }] = await tx`select coalesce(max(version), 0) + 1 as n from public.tool_versions where tool_id = ${tool.id}`;
     const tests = runGeneratedTests(spec, { tables: TABLES, tools: {}, today: new Date().toISOString().slice(0, 10) });
     const checks = { ok: tests.every((t: any) => t.pass), issues: tests.filter((t: any) => !t.pass).length, tests };
-    const [v] = await tx`insert into public.tool_versions (tool_id, version, spec, status, checks, source) values (${tool.id}, ${n}, ${tx.json(spec)}, 'draft', ${tx.json(checks)}, ${tx.json({ drafted_from: desc })}) returning id, version`;
+    const [v] = await tx`insert into public.tool_versions (tool_id, version, spec, status) values (${tool.id}, ${n}, ${tx.json(spec)}, 'draft') returning id, version`;
+    await tx`insert into public.tool_version_admin (version_id, org_id, checks, source) values (${v.id}, ${c.org.id}, ${tx.json(checks)}, ${tx.json({ drafted_from: desc })})`;
     await audit(tx, c, "draft_tool", tool.id, { version: v.version, version_id: v.id, description: desc });
     return { tool_id: tool.id, version_id: v.id, version: v.version, spec, checks };
   });
@@ -264,9 +316,13 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ ok: false, reason: "POST only." }, 405);
   let body: any = {}, caller: Caller | null = null;
   try {
-    body = await req.json().catch(() => refuse("The request body is not JSON."));
+    const raw = await req.text();
+    if (raw.length > MAX_BODY) refuse("The request is too large.");
+    try { body = JSON.parse(raw); } catch { refuse("The request body is not JSON."); }
+    if (!body || typeof body !== "object" || Array.isArray(body)) { body = {}; refuse("The request body must be a JSON object."); }
     caller = await identify(req);
-    const fn = ACTIONS[body.action]; if (!fn) refuse(`Unknown action "${body.action}".`);
+    if (!own(ACTIONS, body.action)) refuse(`Unknown action "${String(body.action).slice(0, 40)}".`);
+    const fn = ACTIONS[body.action];
     return json({ ok: true, result: await fn(caller, body) });
   } catch (err) {
     const known = err instanceof Refusal || (err as any)?.name === "Refusal";

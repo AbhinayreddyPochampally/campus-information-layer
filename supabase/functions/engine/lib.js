@@ -257,7 +257,7 @@ export function runGeneratedTests(spec, ctx) {
   });
 }
 
-// ===================== Seating adapter (from live-build/seating.js, unchanged logic) =====================
+// ===================== Seating adapter (from live-build/seating.js) =====================
 const MONTHS_S = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
 export function inferSheetMeta(name, year) {
   const s = String(name).toLowerCase();
@@ -284,16 +284,27 @@ export function runSeating(sheets, cfg) {
   const conf = cfg.sheets || {};
   Object.entries(sheets).forEach(([sheet, rows]) => {
     const c = conf[sheet];
-    const confirmed = c && c.date && c.start && c.end;
+    const validDate = d => /^\d{4}-\d{2}-\d{2}$/.test(String(d || "")) && !isNaN(Date.parse(d));
+    const validTime = t => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(t || ""));
+    const problem = !c ? "" : !validDate(c.date) ? "the date is not a valid YYYY-MM-DD date" : !(validTime(c.start) && validTime(c.end)) ? "start and end must be HH:MM times" : c.start >= c.end ? "the end time must be after the start" : !c.confirmed ? "it has not been confirmed for this file" : "";
+    const confirmed = !!c && !problem;
+    if (c && problem) flags.push({ key: `sheetbad|${sheet}`, type: "sheet", sheet, message: `Sheet "${sheet}": ${problem}.` });
     const meta = confirmed ? { ...inferSheetMeta(sheet, cfg.year || 2026), ...c, inferred: false } : { ...inferSheetMeta(sheet, cfg.year || 2026), exam: (c && c.exam) || "" };
     if (!confirmed) flags.push({ key: `sheet|${sheet}`, type: "sheet", sheet, message: `Confirm the exam, date and time for sheet "${sheet}". Read from the sheet name: ${meta.date || "no date"} ${meta.start || "?"}–${meta.end || "?"}.`, proposal: meta });
     let room = null, courses = [], header = null;
     rows.forEach((r, i) => {
       const a = String(r[0] || "").trim();
-      const rm = a.match(/^CR\s*-?\s*(\d+)/i);
+      const rm = a.match(/^(?:C\.?\s*R\.?|Room|Classroom)\s*[-.:#]?\s*(\d+)\b/i);
       if (rm) { room = rm[1]; courses = splitExamCourses(r[1]); header = null; if (!String(r[1] || "").trim()) flags.push({ key: `room|${sheet}|${i}`, type: "layout", message: `Room ${room} on sheet "${sheet}" (row ${i + 1}) has no exam or section next to it.` }); return; }
       if (!a && r.some(c => /^COLUMN/i.test(String(c || "")))) { header = r.map(c => { const m = String(c || "").match(/COLUMN\s*-?\s*(\d+)/i); return m ? +m[1] : null; }); return; }
-      const rw = a.match(/^Row\s*-?\s*(\d+)/i);
+      const rw = a.match(/^(?:Row|R)\s*[-.:#]?\s*(\d+)$/i);
+      if (!rw) {
+        // Never skip silently: anything in column A we don't understand, or seats with no row label, blocks publishing.
+        const ids = r.slice(1).map(c => String(c || "").trim()).filter(v => /^\d{6,}$/.test(v));
+        if (a && !/^COLUMN/i.test(a)) flags.push({ key: `unknown|${sheet}|${i}`, type: "layout", message: `"${a.slice(0, 40)}" in column A of "${sheet}" row ${i + 1} is not a room or row label${ids.length ? `, and that row holds ${ids.length} roll number(s)` : ""}.` });
+        else if (!a && ids.length) flags.push({ key: `nolabel|${sheet}|${i}`, type: "layout", message: `Row ${i + 1} on "${sheet}" has ${ids.length} roll number(s) but no row label in column A.` });
+        return;
+      }
       if (rw) {
         if (!room) { flags.push({ key: `orphan|${sheet}|${i}`, type: "layout", message: `Row ${i + 1} on "${sheet}" has seats but no room above it.` }); return; }
         r.forEach((c, j) => {

@@ -70,9 +70,10 @@ let ME = null, VIEW = "today", ADMIN_AS_STUDENT = false;
 async function engine(body) {
   const { data: { session } } = await sb.auth.getSession();
   if (!session) throw new Error("Sign in again.");
-  const r = await fetch(`${SB_URL}/functions/v1/engine`, { method: "POST", headers: { Authorization: `Bearer ${session.access_token}`, apikey: SB_KEY, "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  const j = await r.json().catch(() => ({ ok: false, reason: `Server returned ${r.status}` }));
-  return j;
+  try {
+    const r = await fetch(`${SB_URL}/functions/v1/engine`, { method: "POST", headers: { Authorization: `Bearer ${session.access_token}`, apikey: SB_KEY, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    return await r.json().catch(() => ({ ok: false, reason: `Server returned ${r.status}` }));
+  } catch (e) { return { ok: false, reason: "Couldn't reach the server. Check your connection and try again." }; }
 }
 
 // ---------------- sign-in (email one-time code) ----------------
@@ -143,8 +144,9 @@ function render() {
 async function viewToday() {
   const v = $("#view"); v.innerHTML = `<p class="sub">Loading…</p>`;
   // Only published records the database lets this person see: own seats, rosters for their role, notices to everyone.
-  let q = sb.from("records").select("id, entity, subject_member_id, audience, data, state, created_at, tool_versions!inner(status)").eq("tool_versions.status", "published").order("created_at", { ascending: false }).limit(500);
-  if (ME.staff) q = q.or(`subject_member_id.eq.${ME.member_id || "none"},audience.cs.{everyone}`);
+  // Non-staff: the database already returns only live records they may see. Staff also see drafts, so filter to live ones.
+  let q = sb.from("records").select(ME.staff ? "id, entity, subject_member_id, audience, data, state, created_at, tool_versions!inner(status)" : "id, entity, subject_member_id, audience, data, state, created_at").order("created_at", { ascending: false }).limit(500);
+  if (ME.staff) q = q.eq("tool_versions.status", "published").or(`subject_member_id.eq.${ME.member_id || "none"},audience.cs.{everyone}`);
   const { data, error } = await q;
   if (error) { v.innerHTML = `<div class="card err">Couldn't load: ${esc(error.message)}</div>`; return; }
   const t = todayISO();
@@ -172,11 +174,16 @@ async function viewSeating() {
   const v = $("#view"); v.innerHTML = `<p class="sub">Loading…</p>`;
   const { data: tool } = await sb.from("tools").select("id, name").eq("slug", SEATING_TOOL).maybeSingle();
   let versions = [];
-  if (tool) versions = (await sb.from("tool_versions").select("id, version, status, checks, source, published_at").eq("tool_id", tool.id).order("version", { ascending: false }).limit(5)).data || [];
+  if (tool) {
+    versions = (await sb.from("tool_versions").select("id, version, status, published_at").eq("tool_id", tool.id).order("version", { ascending: false }).limit(5)).data || [];
+    const { data: adm } = versions.length ? await sb.from("tool_version_admin").select("version_id, checks, source").in("version_id", versions.map(x => x.id)) : { data: [] };
+    versions.forEach(x => Object.assign(x, (adm || []).find(a => a.version_id === x.id) || {}));
+  }
   const live = versions.find(x => x.status === "published");
   // remember confirmed sheet settings from the last import
   const last = versions[0];
-  if (last?.source?.cfg?.sheets && !Object.keys(IMPORT.cfg.sheets).length) IMPORT.cfg.sheets = { ...last.source.cfg.sheets };
+  // Prefill from the last import, but every sheet must be confirmed again for this file.
+  if (last?.source?.cfg?.sheets && !Object.keys(IMPORT.cfg.sheets).length) IMPORT.cfg.sheets = Object.fromEntries(Object.entries(last.source.cfg.sheets).map(([k, c]) => [k, { ...c, confirmed: false }]));
   const r = IMPORT.result;
   v.innerHTML = `<h2>Exam seating</h2><p class="sub">Upload the Exam Cell's workbook(s). Nothing is visible to students until you publish.</p>
   <div class="card"><div class="row sp"><h3>Live now</h3>${live ? `<span class="pill ok">v${live.version} live</span>` : `<span class="pill">nothing live</span>`}</div>
@@ -193,7 +200,7 @@ async function viewSeating() {
    </tbody></table></div>
    <h3 style="margin-top:14px">Notice to everyone <span class="sub">(optional)</span></h3>
    <input id="nt" placeholder="Title" value="${esc(IMPORT.notice.title)}" style="width:100%;margin-bottom:6px"><textarea id="nb" placeholder="e.g. Report 15 minutes early. Carry your ID card.">${esc(IMPORT.notice.body)}</textarea>
-   <p><button class="b p" id="chk">Check</button></p></div>
+   <p><button class="b p" id="chk">Confirm these and check</button></p></div>
   <div class="card ${r ? "" : "hide"}" id="res"><h3>3 · Checks</h3>${r ? renderResult(r) : ""}</div>
   ${versions.length ? `<div class="card"><details><summary>Version history</summary><table><tbody>${versions.map(x => `<tr><td>v${x.version}</td><td><span class="pill ${x.status === "published" ? "ok" : x.status === "draft" ? "warn" : ""}">${x.status}</span></td><td class="sub">${esc((x.source?.files || []).join(", "))}</td><td class="sub">${x.checks?.summary?.seats ?? ""} seats</td></tr>`).join("")}</tbody></table></details></div>` : ""}`;
   $("#xl").onchange = readFiles;
@@ -233,7 +240,7 @@ function collectCfg() {
   document.querySelectorAll("tr[data-s]").forEach(tr => {
     const n = names[+tr.dataset.s], c = {};
     tr.querySelectorAll("input[data-k]").forEach(i => c[i.dataset.k] = i.value.trim());
-    if (c.date && c.start && c.end) IMPORT.cfg.sheets[n] = c; else delete IMPORT.cfg.sheets[n];
+    if (c.date && c.start && c.end) IMPORT.cfg.sheets[n] = { ...c, confirmed: true }; else delete IMPORT.cfg.sheets[n];
   });
   IMPORT.notice = { title: ($("#nt")?.value || "").trim(), body: ($("#nb")?.value || "").trim() };
 }
@@ -242,15 +249,17 @@ async function runCheck(first) {
   const btn = $("#chk"); if (btn) btn.disabled = true;
   toast("Checking…");
   const res = await engine({ action: "import", tool: SEATING_TOOL, adapter: "seating", files: IMPORT.files, sheets: IMPORT.sheets, cfg: IMPORT.cfg, notice: IMPORT.notice });
-  if (!res.ok) { toast(res.reason); if (btn) btn.disabled = false; return; }
+  if (btn) btn.disabled = false;
+  if (!res.ok) { toast(res.reason); return; }
   IMPORT.result = res.result;
   toast(res.result.issues ? `${res.result.issues} to resolve` : "All checks pass");
   viewSeating();
 }
 async function publish(versionId) {
   if (!confirm("Publish this seating? Students will see their seats right away.")) return;
+  const btn = $("#pub"); if (btn) { btn.disabled = true; btn.textContent = "Publishing…"; }
   const res = await engine({ action: "publish", version_id: versionId });
-  if (!res.ok) return toast(res.reason);
+  if (!res.ok) { if (btn) { btn.disabled = false; btn.textContent = "Publish"; } return toast(res.reason); }
   toast(`Published v${res.result.published}${res.result.retired ? `, v${res.result.retired} retired` : ""}`);
   IMPORT = { files: [], sheets: {}, cfg: { year: new Date().getFullYear(), sheets: {}, acks: {} }, result: null, notice: { title: "", body: "" } };
   viewSeating();
@@ -270,11 +279,15 @@ async function viewRoles() {
 // ---------------- admin: activity ----------------
 async function viewActivity() {
   const v = $("#view");
-  const [{ data: au }, { data: rf }] = await Promise.all([
+  const [{ data: hc }, { data: au }, { data: rf }] = await Promise.all([
+    sb.from("health_checks").select("run_id, ran_at, check_name, severity, count").order("id", { ascending: false }).limit(40),
     sb.from("audit_log").select("action, detail, at").order("at", { ascending: false }).limit(40),
     sb.from("refusals").select("action, reason, at").order("at", { ascending: false }).limit(40)]);
   const line = a => a.action === "import" ? `Import v${a.detail.version}: ${a.detail.summary?.seats} seats, ${a.detail.issues} issue(s)` : a.action === "publish" ? `Published v${a.detail.version} (${a.detail.records} records)` : a.action === "set_role" ? `${a.detail.email}: ${a.detail.before} → ${a.detail.after}` : a.action === "transition" ? `${a.detail.step}: ${a.detail.before?.state} → ${a.detail.after?.state}` : a.action;
-  v.innerHTML = `<h2>Activity</h2><div class="card scroll"><h3>Changes</h3><table><tbody>${(au || []).map(a => `<tr><td class="mono">${fmtTs(a.at)}</td><td>${esc(line(a))}</td></tr>`).join("") || `<tr><td class="sub">Nothing yet.</td></tr>`}</tbody></table></div>
+  const latest = (hc || []).filter(x => x.run_id === (hc || [])[0]?.run_id);
+  const bad = latest.filter(x => x.severity !== "ok");
+  const health = latest.length ? `<div class="card"><div class="row sp"><h3>System checks</h3><span class="pill ${bad.some(x => x.severity === "critical") ? "bad" : bad.length ? "warn" : "ok"}">${bad.length ? `${bad.length} need attention` : "all passing"}</span></div><p class="sub">Run automatically every hour · last run ${fmtTs(latest[0].ran_at)}</p><table><tbody>${latest.map(x => `<tr><td><span class="pill ${x.severity === "ok" ? "ok" : x.severity === "critical" ? "bad" : "warn"}">${esc(x.severity)}</span></td><td>${esc(x.check_name)}</td><td class="mono">${x.count || ""}</td></tr>`).join("")}</tbody></table></div>` : `<div class="card sub">System checks have not run yet.</div>`;
+  v.innerHTML = `<h2>Activity</h2>${health}<div class="card scroll"><h3>Changes</h3><table><tbody>${(au || []).map(a => `<tr><td class="mono">${fmtTs(a.at)}</td><td>${esc(line(a))}</td></tr>`).join("") || `<tr><td class="sub">Nothing yet.</td></tr>`}</tbody></table></div>
   <div class="card scroll"><h3>Refused calls</h3><table><tbody>${(rf || []).map(a => `<tr><td class="mono">${fmtTs(a.at)}</td><td><span class="pill bad">${esc(a.action)}</span></td><td>${esc(a.reason)}</td></tr>`).join("") || `<tr><td class="sub">None.</td></tr>`}</tbody></table></div>`;
 }
 
