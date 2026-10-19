@@ -79,17 +79,17 @@ async function engine(body) {
 function renderLogin(step = "email", email = "", msg = "") {
   $("#who").innerHTML = ""; $("#orgline").textContent = "Sign in with your campus email";
   app.innerHTML = `<div class="card login"><h3>Sign in</h3>
-  ${step === "email" ? `<p class="sub">We'll email you a 6-digit code. Only campus emails can sign in.</p>
+  ${step === "email" ? `<p class="sub">We'll email you a sign-in link. Only campus emails can sign in.</p>
     <form id="f1"><label for="em">Campus email</label><input id="em" type="email" autocomplete="email" required placeholder="name.rollnumber@iimmumbai.ac.in" value="${esc(email)}">
-    <button class="b p" type="submit">Send code</button></form>`
-  : `<p class="sub">Code sent to <b>${esc(email)}</b>. It can take a minute; check spam too.</p>
-    <form id="f2"><label for="code">6-digit code</label><input id="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6,10}" required>
+    <button class="b p" type="submit">Email me a sign-in link</button></form>`
+  : `<p>Email sent to <b>${esc(email)}</b>. <b>Open it on this device and tap the sign-in link</b>; you'll land back here signed in.</p><p class="sub">It can take a minute; check spam too. If your email shows a code instead, enter it below.</p>
+    <form id="f2"><label for="code">Code (only if your email has one)</label><input id="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6,10}" required>
     <div class="row"><button class="b p" type="submit">Sign in</button><button class="b" type="button" id="back">Use another email</button></div></form>`}
   <p class="err" id="lmsg">${esc(msg)}</p></div>`;
   if (step === "email") $("#f1").onsubmit = async e => {
     e.preventDefault(); const em = $("#em").value.trim().toLowerCase(); $("#lmsg").textContent = "";
     const btn = e.submitter; btn.disabled = true;
-    const { error } = await sb.auth.signInWithOtp({ email: em, options: { shouldCreateUser: true } });
+    const { error } = await sb.auth.signInWithOtp({ email: em, options: { shouldCreateUser: true, emailRedirectTo: location.origin + location.pathname } });
     btn.disabled = false;
     if (error) return renderLogin("email", em, /database error|saving new user/i.test(error.message) ? "This email isn't part of a configured campus. Use your campus email." : error.message);
     renderLogin("code", em);
@@ -278,7 +278,7 @@ async function viewActivity() {
   <div class="card scroll"><h3>Refused calls</h3><table><tbody>${(rf || []).map(a => `<tr><td class="mono">${fmtTs(a.at)}</td><td><span class="pill bad">${esc(a.action)}</span></td><td>${esc(a.reason)}</td></tr>`).join("") || `<tr><td class="sub">None.</td></tr>`}</tbody></table></div>`;
 }
 
-sb.auth.onAuthStateChange((ev) => { if (ev === "SIGNED_OUT") renderLogin(); });
+sb.auth.onAuthStateChange((ev) => { if (ev === "SIGNED_OUT") renderLogin(); if (ev === "SIGNED_IN" && !ME) setTimeout(boot, 0); });
 boot();
 </script>
 </body>
